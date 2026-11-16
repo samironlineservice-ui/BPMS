@@ -1,0 +1,35 @@
+{
+  "name": "ads-erp",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "db:start": "npm run start -w @ads/db",
+    "db:stop": "npm run stop -w @ads/db",
+    "db:migrate": "npm run migrate -w @ads/db",
+    "db:reset": "npm run reset -w @ads/db",
+    "build": "tsc -b && npm run build -w @ads/admin-web && npm run build -w @ads/portal-web",
+    "typecheck": "tsc -b",
+    "test": "npm run test -w @ads/db && npm run test -w @ads/server && npm run smoke",
+    "dev": "node scripts/dev.mjs",
+    "format": "prettier --write .",
+    "seed": "node apps/server/dist/main.js seed",
+    "seed:demo": "node apps/server/dist/main.js seed --demo",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "prettier": "^3.9.10",
+    "typescript": "7.0.2",
+    "vite": "7.3.8"
+  },
+  "overrides": {
+    "vite": "7.3.8"
+  }
+}

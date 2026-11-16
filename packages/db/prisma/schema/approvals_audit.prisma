@@ -1,0 +1,124 @@
+// ─── Approvals (maker-checker) va Audit ───
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXPIRED
+  CANCELLED
+  EXECUTED
+}
+
+enum ActorType {
+  STAFF
+  PORTAL_USER
+  DEVICE
+  SYSTEM
+  GATEWAY
+  API_KEY
+}
+
+enum AuditResult {
+  SUCCESS
+  DENIED
+  FAILED
+}
+
+model ApprovalPolicy {
+  key               String   @id // "payments.refund", "deployments.production", "invoices.void"
+  description       String
+  requiredApprovals  Int      @default(1) @map("required_approvals")
+  approverPermission String @map("approver_permission") // tasdiqlovchida bo'lishi shart bo'lgan ruxsat: "deployments:approve" … (rahbar uni menejerga berishi mumkin)
+  thresholdMinor     BigInt? @map("threshold_minor") // summa chegarasi (masalan, qo'lda to'lov uchun)
+  enabled           Boolean  @default(true)
+  allowSelfApproval Boolean  @default(false) @map("allow_self_approval") // true: ruxsati bor shaxs (masalan, rahbar) o'z so'rovini tasdiqlay oladi
+  updatedAt         DateTime @updatedAt @db.Timestamptz(6) @map("updated_at")
+
+  requests ApprovalRequest[]
+
+  @@map("approval_policies")
+}
+
+model ApprovalRequest {
+  id                String         @id @default(uuid(7)) @db.Uuid
+  policyKey         String @map("policy_key")
+  resourceType      String @map("resource_type")
+  resourceId        String?        @db.Uuid @map("resource_id")
+  payload           Json // bajariladigan amalning to'liq parametrlari
+  payloadHash       String @map("payload_hash") // tasdiqdan keyin payload o'zgarmaganini kafolatlaydi
+  requestedById     String         @db.Uuid @map("requested_by_id")
+  requiredApprovals Int            @default(1) @map("required_approvals")
+  status            ApprovalStatus @default(PENDING)
+  expiresAt         DateTime       @db.Timestamptz(6) @map("expires_at")
+  executedAt        DateTime?      @db.Timestamptz(6) @map("executed_at")
+  createdAt         DateTime       @default(now()) @db.Timestamptz(6) @map("created_at")
+  updatedAt         DateTime       @updatedAt @db.Timestamptz(6) @map("updated_at")
+
+  policy         ApprovalPolicy     @relation(fields: [policyKey], references: [key], onDelete: Restrict)
+  requestedBy    User               @relation("ApprovalRequestedBy", fields: [requestedById], references: [id], onDelete: Restrict)
+  decisions      ApprovalDecision[]
+  deployments    Deployment[]
+  deviceCommands DeviceCommand[]
+  voidedInvoices Invoice[]          @relation("InvoiceVoidApproval")
+
+  @@index([status, policyKey])
+  @@map("approval_requests")
+}
+
+model ApprovalDecision {
+  id         String   @id @default(uuid(7)) @db.Uuid
+  requestId  String   @db.Uuid @map("request_id")
+  approverId String   @db.Uuid @map("approver_id") // trigger: approver ≠ requester (separation of duties)
+  approve    Boolean
+  comment    String?
+  createdAt  DateTime @default(now()) @db.Timestamptz(6) @map("created_at")
+
+  request  ApprovalRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  approver User            @relation("ApprovalDecidedBy", fields: [approverId], references: [id], onDelete: Restrict)
+
+  @@unique([requestId, approverId])
+  @@map("approval_decisions")
+}
+
+/// PARTITION BY RANGE (occurred_at) — oylik; app roliga faqat INSERT/SELECT.
+model AuditLog {
+  id             String      @default(uuid(7)) @db.Uuid
+  occurredAt     DateTime    @default(now()) @db.Timestamptz(6) @map("occurred_at")
+  seq            BigInt      @default(autoincrement())
+  actorType      ActorType @map("actor_type")
+  actorId        String?     @db.Uuid @map("actor_id") // polimorf (soft reference)
+  actorLabel     String? @map("actor_label") // snapshot: email / qurilma nomi
+  impersonatorId String?     @db.Uuid @map("impersonator_id")
+  ip             String?     @db.Inet
+  userAgent      String? @map("user_agent")
+  requestId      String? @map("request_id")
+  action         String // "invoice.void"
+  resourceType   String @map("resource_type")
+  resourceId     String? @map("resource_id")
+  result         AuditResult
+  reason         String?
+  changes        Json? // { before, after } — sirlar redacted
+  metadata       Json?
+
+  @@id([id, occurredAt])
+  @@index([resourceType, resourceId, occurredAt])
+  @@index([actorType, actorId, occurredAt])
+  @@index([action, occurredAt])
+  @@index([seq])
+  @@map("audit_logs")
+}
+
+/// Tungi job: seq oralig'i bo'yicha hash-chain + Ed25519 imzo.
+model AuditSeal {
+  id           String   @id @default(uuid(7)) @db.Uuid
+  fromSeq      BigInt   @unique @map("from_seq")
+  toSeq        BigInt @map("to_seq")
+  rowCount     Int @map("row_count")
+  chainHash    String @map("chain_hash") // H(prevSealHash ‖ H(row₁) ‖ … ‖ H(rowₙ))
+  prevSealHash String? @map("prev_seal_hash")
+  signature    String
+  keyId        String @map("key_id")
+  createdAt    DateTime @default(now()) @db.Timestamptz(6) @map("created_at")
+
+  @@map("audit_seals")
+}

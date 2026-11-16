@@ -1,0 +1,563 @@
+// ─── Devices, Software Versions (Releases), Deployments ───
+// Qurilmalar: VPS, oddiy server (Core i3), GPU server, Raspberry Pi, desktop, ESP32 (mikrokontroller).
+// Loyiha → komponentlar → har komponentning o'z relizlari; o'rnatma = qurilmadagi komponent instansi.
+
+enum CpuArch {
+  X64
+  X86
+  ARM64
+  ARMV7
+  XTENSA // ESP32, ESP32-S2/S3
+  RISCV32 // ESP32-C3/C6/H2
+}
+
+enum DeviceOwnerType {
+  CLIENT // mijozning qurilmasi yoki mijozning VPS'i
+  COMPANY // kompaniya infratuzilmasi (masalan, bir nechta mijozga xizmat qiluvchi VPS/GPU server)
+}
+
+enum DeviceClass {
+  SERVER // oddiy server (Core i3 va h.k.)
+  GPU_SERVER
+  VPS
+  EDGE_SBC // Raspberry Pi va boshqa single-board kompyuterlar
+  MICROCONTROLLER // ESP32
+  DESKTOP
+  MOBILE // Android (keyingi bosqich)
+}
+
+enum DeviceManagementMode {
+  AGENT // qurilmada Go agent
+  FIRMWARE_OTA // ESP32 to'g'ridan-to'g'ri imzolangan firmware OTA (ADS firmware SDK)
+  GATEWAY_PROXIED // ESP32 lokal tarmoqdagi agent-qurilma orqali yangilanadi
+}
+
+enum DeviceStatus {
+  PENDING_APPROVAL
+  ACTIVE
+  DISABLED
+  REVOKED
+  DECOMMISSIONED
+}
+
+enum CredentialStatus {
+  ACTIVE
+  ROTATED
+  REVOKED
+}
+
+enum InstallationStatus {
+  INSTALLING
+  INSTALLED
+  UPDATING
+  FAILED
+  UNINSTALLED
+}
+
+/// Qat'iy allowlist — shell, fayl yozish, masofadan uninstall YO'Q.
+enum CommandType {
+  REFRESH
+  RESTART_COMPONENT
+  RUN_HEALTHCHECK
+  COLLECT_LOGS
+  ROTATE_KEY
+  PAUSE_UPDATES
+  RESUME_UPDATES
+}
+
+enum CommandStatus {
+  QUEUED
+  DELIVERED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  EXPIRED
+  CANCELLED
+}
+
+enum ReleaseStatus {
+  DRAFT
+  UPLOADING
+  SCANNING
+  AWAITING_SIGNATURES
+  READY // TUF repo'da (threshold imzolangan)
+  PUBLISHED // kanal(lar)ga chiqarilgan
+  DEPRECATED
+  REVOKED
+}
+
+enum ReleaseUrgency {
+  NORMAL
+  CRITICAL
+}
+
+enum ArtifactKind {
+  SERVICE_BUNDLE // fon servisi (Node/Python/Go/.NET …) + hook'lar
+  STATIC_WEB_BUNDLE
+  MSI
+  EXE_INSTALLER
+  PORTABLE_ZIP
+  CONTAINER_COMPOSE // docker-compose bundle, image'lar digest bilan pin qilingan
+  MODEL_BUNDLE // AI model og'irliklari / data (GB'lab)
+  FIRMWARE_IMAGE // ESP32 .bin (Secure Boot V2 bilan imzolangan)
+  APK
+  AGENT_BINARY
+}
+
+enum DeploymentStrategy {
+  ALL_AT_ONCE
+  PHASED
+}
+
+enum DeploymentStatus {
+  DRAFT
+  PENDING_APPROVAL
+  SCHEDULED
+  RUNNING
+  PAUSED
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum WaveStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  HALTED
+}
+
+enum TargetStatus {
+  PENDING
+  WAITING_WINDOW
+  BLOCKED_ENTITLEMENT
+  DOWNLOADING
+  DOWNLOADED
+  INSTALLING
+  VERIFYING
+  SUCCEEDED
+  FAILED
+  ROLLED_BACK
+  SKIPPED
+  CANCELLED
+}
+
+model Device {
+  id                    String               @id @default(uuid(7)) @db.Uuid
+  code                  String               @unique // DV-001234
+  ownerType             DeviceOwnerType      @default(CLIENT) @map("owner_type")
+  clientId              String?              @db.Uuid @map("client_id") // CLIENT ⇔ NOT NULL (CHECK)
+  siteId                String?              @db.Uuid @map("site_id") // composite FK (site_id, client_id) → client_sites
+  deviceClass           DeviceClass @map("device_class")
+  managementMode        DeviceManagementMode @default(AGENT) @map("management_mode")
+  gatewayDeviceId       String?              @db.Uuid @map("gateway_device_id") // GATEWAY_PROXIED: uni boshqaradigan agent-qurilma
+  name                  String
+  hostname              String?
+  platform              Platform
+  arch                  CpuArch
+  osName                String? @map("os_name")
+  osVersion             String? @map("os_version")
+  agentVersion          String? @map("agent_version") // AGENT: Go agent; FIRMWARE_OTA: firmware SDK versiyasi
+  agentProtocol         Int? @map("agent_protocol")
+  capabilities          String[] // "svc.migrate.v1", "compose.v1", "gpu.cuda", "selfupdate.ab.v1" …
+  keyProtection         String? @map("key_protection") // tpm2 | cng-tpm | dpapi | file | esp32-nvs-encrypted | atecc608
+  machineId             String? @map("machine_id") // golden image / klon aniqlash
+  secureBootEnabled     Boolean? @map("secure_boot_enabled") // FIRMWARE: ESP32 Secure Boot V2 + flash encryption holati
+  firmwareSecureVersion Int? @map("firmware_secure_version") // ESP32 anti-rollback (eFuse secure_version)
+  lastRequestSeq        BigInt               @default(0) @map("last_request_seq") // high-water mark; orqaga ketsa — klon belgisi
+  status                DeviceStatus         @default(PENDING_APPROVAL)
+  isOnline              Boolean              @default(false) @map("is_online")
+  lastSeenAt            DateTime?            @db.Timestamptz(6) @map("last_seen_at")
+  lastIp                String?              @db.Inet @map("last_ip")
+  hardware              Json? // cpu, ramMb, disk; GPU: model, vramGb, driver, cuda; ESP32: chip, flashMb
+  timezone              String?
+  maintenanceWindow     Json? @map("maintenance_window") // site default'ini override qiladi
+  autoUpdate            Boolean              @default(true) @map("auto_update")
+  enrolledAt            DateTime?            @db.Timestamptz(6) @map("enrolled_at")
+  enrollmentTokenId     String?              @db.Uuid @map("enrollment_token_id")
+  revokedAt             DateTime?            @db.Timestamptz(6) @map("revoked_at")
+  revokeReason          String? @map("revoke_reason")
+  rowVersion            Int                  @default(1) @map("row_version")
+  createdAt             DateTime             @default(now()) @db.Timestamptz(6) @map("created_at")
+  updatedAt             DateTime             @updatedAt @db.Timestamptz(6) @map("updated_at")
+
+  client            Client?              @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  site              ClientSite?          @relation(fields: [siteId, clientId], references: [id, clientId], onDelete: Restrict)
+  gateway           Device?              @relation("DeviceGateway", fields: [gatewayDeviceId], references: [id], onDelete: Restrict)
+  proxiedDevices    Device[]             @relation("DeviceGateway")
+  enrollmentToken   EnrollmentToken?     @relation(fields: [enrollmentTokenId], references: [id], onDelete: Restrict)
+  credentials       DeviceCredential[]
+  installations     DeviceInstallation[]
+  events            DeviceEvent[]
+  commands          DeviceCommand[]
+  tags              DeviceTag[]
+  deploymentTargets DeploymentTarget[]
+
+  requests ClientRequest[]
+
+  @@index([clientId, status])
+  @@index([siteId])
+  @@index([status, lastSeenAt])
+  @@index([deviceClass])
+  @@index([gatewayDeviceId])
+  @@index([machineId])
+  @@map("devices")
+}
+
+model EnrollmentToken {
+  id          String          @id @default(uuid(7)) @db.Uuid
+  tokenHash   String          @unique @map("token_hash")
+  ownerType   DeviceOwnerType @default(CLIENT) @map("owner_type")
+  clientId    String?         @db.Uuid @map("client_id") // CLIENT ⇔ NOT NULL (CHECK)
+  siteId      String?         @db.Uuid @map("site_id")
+  projectIds  String[]        @db.Uuid @map("project_ids") // qurilmaga o'rnatiladigan loyihalar
+  createdById String          @db.Uuid @map("created_by_id")
+  expiresAt   DateTime        @db.Timestamptz(6) @map("expires_at") // ≤ 72 soat
+  maxUses     Int             @default(1) @map("max_uses") // CHECK used_count <= max_uses
+  usedCount   Int             @default(0) @map("used_count")
+  revokedAt   DateTime?       @db.Timestamptz(6) @map("revoked_at")
+  createdAt   DateTime        @default(now()) @db.Timestamptz(6) @map("created_at")
+
+  client    Client?     @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  site      ClientSite? @relation(fields: [siteId, clientId], references: [id, clientId], onDelete: Restrict)
+  createdBy User        @relation("EnrollmentTokenCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  devices   Device[]
+
+  @@index([clientId])
+  @@map("enrollment_tokens")
+}
+
+model DeviceCredential {
+  id             String           @id @default(uuid(7)) @db.Uuid
+  deviceId       String           @db.Uuid @map("device_id")
+  algorithm      String           @default("ES256")
+  publicKeyJwk   Json @map("public_key_jwk")
+  thumbprint     String           @unique // RFC 7638 → JWS `kid`
+  status         CredentialStatus @default(ACTIVE)
+  hardwareBacked Boolean          @default(false) @map("hardware_backed")
+  createdAt      DateTime         @default(now()) @db.Timestamptz(6) @map("created_at")
+  rotatedAt      DateTime?        @db.Timestamptz(6) @map("rotated_at")
+  revokedAt      DateTime?        @db.Timestamptz(6) @map("revoked_at")
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Restrict)
+
+  @@index([deviceId])
+  @@unique([deviceId], map: "device_credentials_one_active_uq", where: raw("status = 'ACTIVE'"))
+  @@map("device_credentials")
+}
+
+/// Qurilmadagi komponent instansi. clientProjectId NULL — umumiy (shared) instans, faqat COMPANY qurilmada (trigger).
+/// Bitta VPS'da bir nechta mijozning instansi bo'lishi mumkin.
+model DeviceInstallation {
+  id               String             @id @default(uuid(7)) @db.Uuid
+  deviceId         String             @db.Uuid @map("device_id")
+  componentId      String             @db.Uuid @map("component_id")
+  projectId        String             @db.Uuid @map("project_id") // integrity anchor
+  clientId         String?            @db.Uuid @map("client_id") // (client_project_id IS NULL) = (client_id IS NULL) — CHECK
+  clientProjectId  String?            @db.Uuid @map("client_project_id")
+  instanceName     String? @map("instance_name") // masalan "client-a-prod"
+  currentReleaseId String?            @db.Uuid @map("current_release_id")
+  currentVersion   String? @map("current_version") // agent hisoboti (release DB'da bo'lmasa ham)
+  desiredReleaseId String?            @db.Uuid @map("desired_release_id") // deployments moduli hisoblaydi
+  pinnedReleaseId  String?            @db.Uuid @map("pinned_release_id") // qo'lda "shu versiyada qolsin"
+  status           InstallationStatus @default(INSTALLING)
+  installPath      String? @map("install_path")
+  lastReportedAt   DateTime?          @db.Timestamptz(6) @map("last_reported_at")
+  lastError        String? @map("last_error")
+  createdAt        DateTime           @default(now()) @db.Timestamptz(6) @map("created_at")
+  updatedAt        DateTime           @updatedAt @db.Timestamptz(6) @map("updated_at")
+
+  device            Device             @relation(fields: [deviceId], references: [id], onDelete: Restrict)
+  component         ProjectComponent   @relation(fields: [componentId, projectId], references: [id, projectId], onDelete: Restrict)
+  clientProject     ClientProject?     @relation(fields: [clientProjectId, clientId, projectId], references: [id, clientId, projectId], onDelete: Restrict)
+  currentRelease    Release?           @relation("InstallationCurrentRelease", fields: [currentReleaseId, componentId], references: [id, componentId], onDelete: Restrict)
+  desiredRelease    Release?           @relation("InstallationDesiredRelease", fields: [desiredReleaseId, componentId], references: [id, componentId], onDelete: Restrict)
+  pinnedRelease     Release?           @relation("InstallationPinnedRelease", fields: [pinnedReleaseId, componentId], references: [id, componentId], onDelete: Restrict)
+  deploymentTargets DeploymentTarget[]
+
+  @@unique([id, componentId, deviceId]) // composite FK nishoni (deployment_targets)
+  @@unique([deviceId, componentId, clientProjectId], map: "device_installations_client_uq", where: raw("client_project_id IS NOT NULL"))
+  @@unique([deviceId, componentId], map: "device_installations_shared_uq", where: raw("client_project_id IS NULL"))
+  @@index([componentId, currentReleaseId])
+  @@index([clientProjectId])
+  @@map("device_installations")
+}
+
+/// PARTITION BY RANGE (occurred_at), 180 kun retention.
+model DeviceEvent {
+  id         String   @default(uuid(7)) @db.Uuid
+  occurredAt DateTime @default(now()) @db.Timestamptz(6) @map("occurred_at")
+  deviceId   String   @db.Uuid @map("device_id")
+  type       String // ENROLLED|ONLINE|OFFLINE|KEY_ROTATED|INVENTORY_CHANGED|AGENT_UPDATED|CLOCK_SKEW|TAMPER_ALERT|SECURE_BOOT_OFF
+  data       Json?
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Restrict)
+
+  @@id([id, occurredAt])
+  @@index([deviceId, occurredAt])
+  @@map("device_events")
+}
+
+model DeviceCommand {
+  id                String        @id @default(uuid(7)) @db.Uuid
+  deviceId          String        @db.Uuid @map("device_id")
+  type              CommandType
+  params            Json // tur bo'yicha Zod schema
+  status            CommandStatus @default(QUEUED)
+  createdById       String        @db.Uuid @map("created_by_id")
+  approvalRequestId String?       @db.Uuid @map("approval_request_id")
+  expiresAt         DateTime      @db.Timestamptz(6) @map("expires_at")
+  deliveredAt       DateTime?     @db.Timestamptz(6) @map("delivered_at")
+  completedAt       DateTime?     @db.Timestamptz(6) @map("completed_at")
+  result            Json?
+  createdAt         DateTime      @default(now()) @db.Timestamptz(6) @map("created_at")
+
+  device          Device           @relation(fields: [deviceId], references: [id], onDelete: Restrict)
+  createdBy       User             @relation("DeviceCommandCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  approvalRequest ApprovalRequest? @relation(fields: [approvalRequestId], references: [id], onDelete: Restrict)
+
+  @@index([deviceId, status])
+  @@map("device_commands")
+}
+
+model DeviceTag {
+  deviceId String @db.Uuid @map("device_id")
+  tagId    String @db.Uuid @map("tag_id")
+
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  tag    Tag    @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([deviceId, tagId])
+  @@map("device_tags")
+}
+
+model ReleaseChannel {
+  id        String  @id @default(uuid(7)) @db.Uuid
+  projectId String  @db.Uuid @map("project_id")
+  key       String // stable | beta | canary
+  name      String
+  isDefault Boolean @default(false) @map("is_default")
+
+  project    Project               @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  entries    ReleaseChannelEntry[]
+  defaultFor ClientProject[]
+
+  @@unique([projectId, key])
+  @@unique([id, projectId]) // composite FK nishoni
+  @@unique([projectId], map: "release_channels_one_default_uq", where: raw("is_default"))
+  @@map("release_channels")
+}
+
+/// Komponent relizi (versiya). Bitta loyihada komponentlar mustaqil versiyalanadi.
+model Release {
+  id              String         @id @default(uuid(7)) @db.Uuid
+  projectId       String         @db.Uuid @map("project_id")
+  componentId     String         @db.Uuid @map("component_id")
+  version         String // SemVer 2.0 (CHECK regex)
+  major           Int
+  minor           Int
+  patch           Int
+  prerelease      String?
+  versionCode     Int @map("version_code") // monoton; securityFloor bilan solishtiriladi (anti-rollback)
+  status          ReleaseStatus  @default(DRAFT)
+  securityFix     Boolean        @default(false) @map("security_fix") // SUSPENDED mijozlarga ham yetkaziladi
+  urgency         ReleaseUrgency @default(NORMAL)
+  minAgentVersion String? @map("min_agent_version")
+  upgradeFrom     String? @map("upgrade_from") // semver oralig'i: ">=2.2.0 <2.4.1"
+  releaseNotes    Json @map("release_notes") // { uz, ru, en } Markdown
+  tufRole         String? @map("tuf_role") // delegated rol: "project-pos-retail"
+  tufRoleVersion  Int? @map("tuf_role_version") // relizni kiritgan, threshold imzolangan metadata versiyasi
+  createdById     String         @db.Uuid @map("created_by_id")
+  publishedById   String?        @db.Uuid @map("published_by_id") // SoD: createdById ≠ publishedById
+  publishedAt     DateTime?      @db.Timestamptz(6) @map("published_at")
+  revokedAt       DateTime?      @db.Timestamptz(6) @map("revoked_at")
+  revokeReason    String? @map("revoke_reason")
+  rowVersion      Int            @default(1) @map("row_version")
+  createdAt       DateTime       @default(now()) @db.Timestamptz(6) @map("created_at")
+  updatedAt       DateTime       @updatedAt @db.Timestamptz(6) @map("updated_at")
+
+  project              Project               @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  component            ProjectComponent      @relation(fields: [componentId, projectId], references: [id, projectId], onDelete: Restrict)
+  createdBy            User                  @relation("ReleaseCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  publishedBy          User?                 @relation("ReleasePublishedBy", fields: [publishedById], references: [id], onDelete: Restrict)
+  artifacts            ReleaseArtifact[]
+  channelEntries       ReleaseChannelEntry[]
+  deployments          Deployment[]
+  deploymentTargets    DeploymentTarget[]
+  installationsCurrent DeviceInstallation[]  @relation("InstallationCurrentRelease")
+  installationsDesired DeviceInstallation[]  @relation("InstallationDesiredRelease")
+  installationsPinned  DeviceInstallation[]  @relation("InstallationPinnedRelease")
+
+  @@unique([componentId, version])
+  @@unique([componentId, versionCode])
+  @@unique([id, projectId]) // composite FK nishoni (kanallar)
+  @@unique([id, componentId]) // composite FK nishoni (o'rnatmalar, deploymentlar)
+  @@index([componentId, status, major, minor, patch])
+  @@map("releases")
+}
+
+model ReleaseArtifact {
+  id            String       @id @default(uuid(7)) @db.Uuid
+  releaseId     String       @db.Uuid @map("release_id")
+  platform      Platform
+  arch          CpuArch
+  kind          ArtifactKind
+  variant       String       @default("") // "esp32s3", "cuda12", "cpu" … (bir platforma/arxitekturada bir nechta build)
+  fileId        String       @db.Uuid @map("file_id")
+  sha256        String // CHECK '^[0-9a-f]{64}$'
+  sha512        String
+  sizeBytes     BigInt @map("size_bytes") // CHECK > 0 (TUF `length`)
+  tufTargetPath String       @unique @map("tuf_target_path") // "<project>/<component>/<version>/<platform>-<arch>[-variant]/<file>"
+  customMeta    Json @map("custom_meta") // TUF `custom` — imzo ostida; DB nusxasi faqat UI/qidiruv uchun
+  createdAt     DateTime     @default(now()) @db.Timestamptz(6) @map("created_at")
+
+  release Release @relation(fields: [releaseId], references: [id], onDelete: Restrict)
+  file    File    @relation(fields: [fileId], references: [id], onDelete: Restrict)
+
+  @@unique([releaseId, platform, arch, kind, variant])
+  @@map("release_artifacts")
+}
+
+model ReleaseChannelEntry {
+  releaseId    String   @db.Uuid @map("release_id")
+  channelId    String   @db.Uuid @map("channel_id")
+  projectId    String   @db.Uuid @map("project_id") // release va kanal bitta loyihaga tegishli (composite FK)
+  promotedById String   @db.Uuid @map("promoted_by_id")
+  promotedAt   DateTime @default(now()) @db.Timestamptz(6) @map("promoted_at")
+
+  release    Release        @relation(fields: [releaseId, projectId], references: [id, projectId], onDelete: Restrict)
+  channel    ReleaseChannel @relation(fields: [channelId, projectId], references: [id, projectId], onDelete: Restrict)
+  promotedBy User           @relation("ReleasePromotedBy", fields: [promotedById], references: [id], onDelete: Restrict)
+
+  @@id([releaseId, channelId])
+  @@map("release_channel_entries")
+}
+
+/// TUF metadata versiyalari (append-only). Asl fayllar S3'da: tuf/<version>.<role>.json
+model TufMetadata {
+  id           String   @id @default(uuid(7)) @db.Uuid
+  role         String // root | targets | project-<code> | agent | firmware | snapshot | timestamp
+  version      Int
+  json         Json
+  sha256       String
+  expiresAt    DateTime @db.Timestamptz(6) @map("expires_at") // monitoring: 30/14/7 kun oldin alert
+  storageKey   String @map("storage_key")
+  uploadedById String?  @db.Uuid @map("uploaded_by_id")
+  createdAt    DateTime @default(now()) @db.Timestamptz(6) @map("created_at")
+
+  uploadedBy User? @relation("TufMetadataUploadedBy", fields: [uploadedById], references: [id], onDelete: Restrict)
+
+  @@unique([role, version])
+  @@index([role, expiresAt])
+  @@map("tuf_metadata")
+}
+
+/// Bitta komponent relizini o'rnatmalarga yetkazish (bosqichli rollout).
+model Deployment {
+  id                 String             @id @default(uuid(7)) @db.Uuid
+  code               String             @unique // DEP-2026-0007
+  projectId          String             @db.Uuid @map("project_id")
+  componentId        String             @db.Uuid @map("component_id")
+  releaseId          String             @db.Uuid @map("release_id")
+  strategy           DeploymentStrategy @default(PHASED)
+  targetSelector     Json @map("target_selector") // client/site/device/class/tag/platform/channel filtrlari
+  status             DeploymentStatus   @default(DRAFT)
+  scheduledAt        DateTime?          @db.Timestamptz(6) @map("scheduled_at")
+  startedAt          DateTime?          @db.Timestamptz(6) @map("started_at")
+  completedAt        DateTime?          @db.Timestamptz(6) @map("completed_at")
+  respectMaintenance Boolean            @default(true) @map("respect_maintenance")
+  haltMinFailures    Int                @default(3) @map("halt_min_failures") // to'xtatish: xatolar ≥ 3 VA …
+  haltFailureRateBp  Int                @default(200) @map("halt_failure_rate_bp") // … ulush ≥ 2% (basis points)
+  autoRollback       Boolean            @default(true) @map("auto_rollback")
+  allowDowngrade     Boolean            @default(false) @map("allow_downgrade") // faqat signed securityFloor'gacha
+  createdById        String             @db.Uuid @map("created_by_id")
+  approvalRequestId  String?            @db.Uuid @map("approval_request_id")
+  rowVersion         Int                @default(1) @map("row_version")
+  createdAt          DateTime           @default(now()) @db.Timestamptz(6) @map("created_at")
+  updatedAt          DateTime           @updatedAt @db.Timestamptz(6) @map("updated_at")
+
+  project         Project            @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  component       ProjectComponent   @relation(fields: [componentId, projectId], references: [id, projectId], onDelete: Restrict)
+  release         Release            @relation(fields: [releaseId, componentId], references: [id, componentId], onDelete: Restrict)
+  createdBy       User               @relation("DeploymentCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  approvalRequest ApprovalRequest?   @relation(fields: [approvalRequestId], references: [id], onDelete: Restrict)
+  waves           DeploymentWave[]
+  targets         DeploymentTarget[]
+
+  @@unique([id, componentId]) // composite FK nishoni
+  @@index([projectId, status])
+  @@index([componentId, status])
+  @@map("deployments")
+}
+
+model DeploymentWave {
+  id           String     @id @default(uuid(7)) @db.Uuid
+  deploymentId String     @db.Uuid @map("deployment_id")
+  index        Int // 0 = ring 0
+  percent      Int // kumulyativ: ring0, 2, 10, 30, 100
+  soakMinutes  Int        @default(1440) @map("soak_minutes") // ring 0: 120
+  status       WaveStatus @default(PENDING)
+  startedAt    DateTime?  @db.Timestamptz(6) @map("started_at")
+  completedAt  DateTime?  @db.Timestamptz(6) @map("completed_at")
+
+  deployment Deployment         @relation(fields: [deploymentId], references: [id], onDelete: Restrict)
+  targets    DeploymentTarget[]
+
+  @@unique([deploymentId, index])
+  @@unique([id, deploymentId]) // composite FK nishoni
+  @@map("deployment_waves")
+}
+
+/// installationId NULL — agent self-update (qurilmaning o'zi nishon).
+model DeploymentTarget {
+  id             String       @id @default(uuid(7)) @db.Uuid
+  deploymentId   String       @db.Uuid @map("deployment_id")
+  waveId         String       @db.Uuid @map("wave_id")
+  deviceId       String       @db.Uuid @map("device_id")
+  componentId    String       @db.Uuid @map("component_id")
+  installationId String?      @db.Uuid @map("installation_id")
+  fromVersion    String? @map("from_version")
+  toReleaseId    String       @db.Uuid @map("to_release_id")
+  status         TargetStatus @default(PENDING)
+  attempt        Int          @default(0)
+  lastAgentSeq   BigInt       @default(0) @map("last_agent_seq") // hisobotlar idempotentligi (seq ≤ last → e'tiborsiz)
+  lastError      String? @map("last_error")
+  startedAt      DateTime?    @db.Timestamptz(6) @map("started_at")
+  finishedAt     DateTime?    @db.Timestamptz(6) @map("finished_at")
+  createdAt      DateTime     @default(now()) @db.Timestamptz(6) @map("created_at")
+  updatedAt      DateTime     @updatedAt @db.Timestamptz(6) @map("updated_at")
+
+  deployment   Deployment              @relation(fields: [deploymentId, componentId], references: [id, componentId], onDelete: Restrict)
+  wave         DeploymentWave          @relation(fields: [waveId, deploymentId], references: [id, deploymentId], onDelete: Restrict)
+  device       Device                  @relation(fields: [deviceId], references: [id], onDelete: Restrict)
+  installation DeviceInstallation?     @relation(fields: [installationId, componentId, deviceId], references: [id, componentId, deviceId], onDelete: Restrict)
+  toRelease    Release                 @relation(fields: [toReleaseId, componentId], references: [id, componentId], onDelete: Restrict)
+  events       DeploymentTargetEvent[]
+
+  @@index([deviceId, status])
+  @@unique([deploymentId, installationId], map: "deployment_targets_installation_uq", where: raw("installation_id IS NOT NULL"))
+  @@unique([deploymentId, deviceId], map: "deployment_targets_device_uq", where: raw("installation_id IS NULL"))
+  // Bitta o'rnatma (yoki agent) bir vaqtda faqat BITTA faol deploymentda:
+  @@unique([installationId], map: "deployment_targets_one_active_uq", where: raw("installation_id IS NOT NULL AND (status = 'PENDING' OR status = 'WAITING_WINDOW' OR status = 'DOWNLOADING' OR status = 'DOWNLOADED' OR status = 'INSTALLING' OR status = 'VERIFYING')"))
+  @@unique([deviceId, componentId], map: "deployment_targets_one_active_agent_uq", where: raw("installation_id IS NULL AND (status = 'PENDING' OR status = 'WAITING_WINDOW' OR status = 'DOWNLOADING' OR status = 'DOWNLOADED' OR status = 'INSTALLING' OR status = 'VERIFYING')"))
+  @@map("deployment_targets")
+}
+
+/// PARTITION BY RANGE (received_at).
+model DeploymentTargetEvent {
+  id         String       @default(uuid(7)) @db.Uuid
+  receivedAt DateTime     @default(now()) @db.Timestamptz(6) @map("received_at")
+  targetId   String       @db.Uuid @map("target_id")
+  status     TargetStatus
+  step       String? // agent jurnal qadami: DOWNLOADED, VERIFIED, MIGRATED …
+  message    String?
+  data       Json?
+  agentTime  DateTime?    @db.Timestamptz(6) @map("agent_time")
+  agentSeq   BigInt? @map("agent_seq")
+
+  target DeploymentTarget @relation(fields: [targetId], references: [id], onDelete: Restrict)
+
+  @@id([id, receivedAt])
+  @@index([targetId, receivedAt])
+  @@map("deployment_target_events")
+}

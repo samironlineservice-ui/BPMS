@@ -1,0 +1,297 @@
+// ─── IAM: xodimlar, rollar, ruxsatlar, sessiyalar, portal foydalanuvchilari ───
+
+enum AuthRealm {
+  STAFF
+  PORTAL
+}
+
+enum UserStatus {
+  INVITED
+  ACTIVE
+  LOCKED
+  DEACTIVATED
+}
+
+enum ScopeType {
+  GLOBAL
+  PROJECT
+  CLIENT
+}
+
+enum AuthTokenPurpose {
+  INVITE
+  PASSWORD_RESET
+  EMAIL_VERIFY
+}
+
+enum PortalRole {
+  OWNER
+  ACCOUNTANT
+  TECHNICIAN
+  VIEWER
+}
+
+model User {
+  id                String     @id @default(uuid(7)) @db.Uuid
+  email             String     @unique // CHECK: email = lower(email)
+  fullName          String @map("full_name")
+  phone             String?
+  locale            String     @default("uz")
+  timezone          String     @default("Asia/Tashkent")
+  status            UserStatus @default(INVITED)
+  isServiceAccount  Boolean    @default(false) @map("is_service_account") // CI / integratsiyalar (ApiKey egasi)
+  passwordHash      String? @map("password_hash") // argon2id
+  passwordChangedAt DateTime?  @db.Timestamptz(6) @map("password_changed_at")
+  mfaRequired       Boolean    @default(true) @map("mfa_required")
+  failedLoginCount  Int        @default(0) @map("failed_login_count")
+  lockedUntil       DateTime?  @db.Timestamptz(6) @map("locked_until")
+  lastLoginAt       DateTime?  @db.Timestamptz(6) @map("last_login_at")
+  rowVersion        Int        @default(1) @map("row_version")
+  createdAt         DateTime   @default(now()) @db.Timestamptz(6) @map("created_at")
+  updatedAt         DateTime   @updatedAt @db.Timestamptz(6) @map("updated_at")
+
+  roleAssignments       UserRoleAssignment[] @relation("UserRoles")
+  rolesGranted          UserRoleAssignment[] @relation("RoleGrantedBy")
+  sessions              Session[]            @relation("UserSessions")
+  mfaFactors            MfaFactor[]
+  passkeys              Passkey[]
+  recoveryCodes         RecoveryCode[]
+  apiKeys               ApiKey[]
+  approvalRequests      ApprovalRequest[]    @relation("ApprovalRequestedBy")
+  approvalDecisions     ApprovalDecision[]   @relation("ApprovalDecidedBy")
+  managedClients        Client[]             @relation("ClientAccountManager")
+  clientNotes           ClientNote[]         @relation("ClientNoteAuthor")
+  ownedProjects         Project[]            @relation("ProjectOwner")
+  projectMemberships    ProjectMember[]      @relation("ProjectMemberUser")
+  managedClientProjects ClientProject[]      @relation("ClientProjectAccountManager")
+  enrollmentTokens      EnrollmentToken[]    @relation("EnrollmentTokenCreatedBy")
+  deviceCommands        DeviceCommand[]      @relation("DeviceCommandCreatedBy")
+  releasesCreated       Release[]            @relation("ReleaseCreatedBy")
+  releasesPublished     Release[]            @relation("ReleasePublishedBy")
+  releasePromotions     ReleaseChannelEntry[] @relation("ReleasePromotedBy")
+  tufUploads            TufMetadata[]        @relation("TufMetadataUploadedBy")
+  deploymentsCreated    Deployment[]         @relation("DeploymentCreatedBy")
+  reportJobs            ReportJob[]          @relation("ReportRequestedBy")
+  savedViews            SavedView[]          @relation("SavedViewOwner")
+  settingsUpdated       Setting[]            @relation("SettingUpdatedBy")
+  planPricesCreated     PlanPrice[]          @relation("PlanPriceCreatedBy")
+  creditNotesCreated    CreditNote[]         @relation("CreditNoteCreatedBy")
+  creditNotesApproved   CreditNote[]         @relation("CreditNoteApprovedBy")
+  paymentsCreated       Payment[]            @relation("PaymentCreatedBy")
+  paymentsApproved      Payment[]            @relation("PaymentApprovedBy")
+  refundsRequested      Refund[]             @relation("RefundRequestedBy")
+  refundsApproved       Refund[]             @relation("RefundApprovedBy")
+  fxRatesCreated        FxRate[]             @relation("FxRateCreatedBy")
+  periodsClosed         FinancialPeriod[]    @relation("PeriodClosedBy")
+  expensesCreated       Expense[]            @relation("ExpenseCreatedBy")
+  authTokens            AuthToken[]          @relation("UserAuthTokens")
+
+  requestsCreated  ClientRequest[]        @relation("RequestCreatedBy")
+  requestsAssigned ClientRequest[]        @relation("RequestAssignee")
+  requestMessages  ClientRequestMessage[]
+
+  @@map("users")
+}
+
+model Role {
+  id          String    @id @default(uuid(7)) @db.Uuid
+  key         String    @unique // "finance_manager"
+  name        String
+  description String?
+  realm       AuthRealm @default(STAFF)
+  isSystem    Boolean   @default(false) @map("is_system") // system rollari tahrirlanmaydi/o'chirilmaydi (trigger)
+  rowVersion  Int       @default(1) @map("row_version")
+  createdAt   DateTime  @default(now()) @db.Timestamptz(6) @map("created_at")
+  updatedAt   DateTime  @updatedAt @db.Timestamptz(6) @map("updated_at")
+
+  permissions RolePermission[]
+  assignments UserRoleAssignment[]
+
+  @@map("roles")
+}
+
+/// Koddagi katalogdan (packages/contracts/permissions.ts) seed qilinadi — yagona manba.
+model Permission {
+  key         String  @id // "invoices:void"
+  module      String
+  description String
+  sensitive   Boolean @default(false) // step-up auth va/yoki approval talab qiladi
+
+  roles RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId        String   @db.Uuid @map("role_id")
+  permissionKey String @map("permission_key")
+  condition     String? // whitelist'dagi shart: "own_clients" | "project_member" ...
+  fields        String[] // field-level cheklov (bo'sh = barcha maydonlar)
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionKey], references: [key], onDelete: Restrict)
+
+  @@id([roleId, permissionKey])
+  @@map("role_permissions")
+}
+
+model UserRoleAssignment {
+  id          String    @id @default(uuid(7)) @db.Uuid
+  userId      String    @db.Uuid @map("user_id")
+  roleId      String    @db.Uuid @map("role_id")
+  scopeType   ScopeType @default(GLOBAL) @map("scope_type")
+  scopeId     String?   @db.Uuid @map("scope_id") // PROJECT/CLIENT id (polimorf); CHECK: GLOBAL ⇔ NULL
+  grantedById String?   @db.Uuid @map("granted_by_id")
+  expiresAt   DateTime? @db.Timestamptz(6) @map("expires_at") // vaqtinchalik (JIT) huquq
+  createdAt   DateTime  @default(now()) @db.Timestamptz(6) @map("created_at")
+
+  user      User  @relation("UserRoles", fields: [userId], references: [id], onDelete: Restrict)
+  role      Role  @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  grantedBy User? @relation("RoleGrantedBy", fields: [grantedById], references: [id], onDelete: Restrict)
+
+  @@index([userId])
+  @@index([scopeType, scopeId])
+  @@unique([userId, roleId], map: "user_role_assignments_global_uq", where: raw("scope_type = 'GLOBAL'"))
+  @@unique([userId, roleId, scopeType, scopeId], map: "user_role_assignments_scoped_uq", where: raw("scope_type <> 'GLOBAL'"))
+  @@map("user_role_assignments")
+}
+
+model Session {
+  id                String    @id @default(uuid(7)) @db.Uuid
+  realm             AuthRealm
+  userId            String?   @db.Uuid @map("user_id") // CHECK: STAFF ⇔ userId, PORTAL ⇔ portalUserId
+  portalUserId      String?   @db.Uuid @map("portal_user_id")
+  tokenHash         String    @unique @map("token_hash") // SHA-256(token); token faqat cookie'da
+  mfaVerifiedAt     DateTime? @db.Timestamptz(6) @map("mfa_verified_at")
+  stepUpAt          DateTime? @db.Timestamptz(6) @map("step_up_at")
+  ip                String?   @db.Inet
+  userAgent         String? @map("user_agent")
+  lastSeenAt        DateTime  @default(now()) @db.Timestamptz(6) @map("last_seen_at")
+  idleExpiresAt     DateTime  @db.Timestamptz(6) @map("idle_expires_at")
+  absoluteExpiresAt DateTime  @db.Timestamptz(6) @map("absolute_expires_at")
+  revokedAt         DateTime? @db.Timestamptz(6) @map("revoked_at")
+  revokeReason      String? @map("revoke_reason")
+  createdAt         DateTime  @default(now()) @db.Timestamptz(6) @map("created_at")
+
+  user       User?       @relation("UserSessions", fields: [userId], references: [id], onDelete: Cascade)
+  portalUser PortalUser? @relation("PortalUserSessions", fields: [portalUserId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([portalUserId])
+  @@map("sessions")
+}
+
+model MfaFactor {
+  id          String    @id @default(uuid(7)) @db.Uuid
+  userId      String    @db.Uuid @map("user_id")
+  type        String    @default("TOTP")
+  secretEnc   Bytes @map("secret_enc") // AES-256-GCM (envelope)
+  keyVersion  Int @map("key_version")
+  confirmedAt DateTime? @db.Timestamptz(6) @map("confirmed_at")
+  lastUsedStep BigInt?  @map("last_used_step") // TOTP replay himoyasi
+  createdAt   DateTime  @default(now()) @db.Timestamptz(6) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("mfa_factors")
+}
+
+model Passkey {
+  id           String    @id @default(uuid(7)) @db.Uuid
+  userId       String    @db.Uuid @map("user_id")
+  credentialId String    @unique @map("credential_id")
+  publicKey    Bytes @map("public_key")
+  counter      BigInt    @default(0)
+  transports   String[]
+  name         String?
+  lastUsedAt   DateTime? @db.Timestamptz(6) @map("last_used_at")
+  createdAt    DateTime  @default(now()) @db.Timestamptz(6) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("passkeys")
+}
+
+model RecoveryCode {
+  id        String    @id @default(uuid(7)) @db.Uuid
+  userId    String    @db.Uuid @map("user_id")
+  codeHash  String @map("code_hash")
+  usedAt    DateTime? @db.Timestamptz(6) @map("used_at")
+  createdAt DateTime  @default(now()) @db.Timestamptz(6) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("recovery_codes")
+}
+
+model ApiKey {
+  id         String    @id @default(uuid(7)) @db.Uuid
+  ownerId    String    @db.Uuid @map("owner_id") // service account (User.isServiceAccount)
+  prefix     String    @unique
+  secretHash String @map("secret_hash")
+  scopes     String[]
+  expiresAt  DateTime? @db.Timestamptz(6) @map("expires_at")
+  lastUsedAt DateTime? @db.Timestamptz(6) @map("last_used_at")
+  revokedAt  DateTime? @db.Timestamptz(6) @map("revoked_at")
+  createdAt  DateTime  @default(now()) @db.Timestamptz(6) @map("created_at")
+
+  owner User @relation(fields: [ownerId], references: [id], onDelete: Restrict)
+
+  @@index([ownerId])
+  @@map("api_keys")
+}
+
+model PortalUser {
+  id              String     @id @default(uuid(7)) @db.Uuid
+  clientId        String     @db.Uuid @map("client_id")
+  contactId       String?    @unique @db.Uuid @map("contact_id")
+  email           String // partial unique (lower(email)) WHERE status <> 'DEACTIVATED'
+  fullName        String @map("full_name")
+  passwordHash    String? @map("password_hash")
+  status          UserStatus @default(INVITED)
+  portalRole      PortalRole @default(VIEWER) @map("portal_role")
+  emailVerifiedAt DateTime?  @db.Timestamptz(6) @map("email_verified_at")
+  mfaEnabled      Boolean    @default(false) @map("mfa_enabled")
+  lastLoginAt     DateTime?  @db.Timestamptz(6) @map("last_login_at")
+  rowVersion      Int        @default(1) @map("row_version")
+  createdAt       DateTime   @default(now()) @db.Timestamptz(6) @map("created_at")
+  updatedAt       DateTime   @updatedAt @db.Timestamptz(6) @map("updated_at")
+
+  client   Client         @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  contact  ClientContact? @relation(fields: [contactId], references: [id], onDelete: Restrict)
+  sessions   Session[]      @relation("PortalUserSessions")
+  authTokens AuthToken[]
+
+  requests        ClientRequest[]
+  requestMessages ClientRequestMessage[]
+
+  checkoutOrders CheckoutOrder[]
+  paymentCards   PaymentCard[]
+  paymentOrders  PaymentOrder[]
+
+  @@index([clientId])
+  @@unique([email], map: "portal_users_email_active_uq", where: raw("status <> 'DEACTIVATED'"))
+  @@map("portal_users")
+}
+
+/// Bir martalik tokenlar: taklif, parolni tiklash, email tasdiqlash (faqat SHA-256 hash saqlanadi).
+model AuthToken {
+  tokenHash    String           @id @map("token_hash")
+  purpose      AuthTokenPurpose
+  userId       String?          @db.Uuid @map("user_id")
+  portalUserId String?          @db.Uuid @map("portal_user_id")
+  expiresAt    DateTime         @db.Timestamptz(6) @map("expires_at")
+  usedAt       DateTime?        @db.Timestamptz(6) @map("used_at")
+  createdById  String?          @db.Uuid @map("created_by_id")
+  createdAt    DateTime         @default(now()) @db.Timestamptz(6) @map("created_at")
+
+  user       User?       @relation("UserAuthTokens", fields: [userId], references: [id], onDelete: Cascade)
+  portalUser PortalUser? @relation(fields: [portalUserId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([portalUserId])
+  @@map("auth_tokens")
+}

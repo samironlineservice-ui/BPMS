@@ -1,0 +1,317 @@
+// ─── Files, Notifications, Analytics, System ───
+
+enum FileStatus {
+  PENDING_UPLOAD
+  UPLOADED
+  SCANNING
+  AVAILABLE
+  QUARANTINED
+  DELETED
+}
+
+enum FolderOwnerType {
+  PROJECT
+  CLIENT
+  GENERAL
+}
+
+enum NotificationChannel {
+  IN_APP
+  EMAIL
+  TELEGRAM
+  SMS
+}
+
+enum NotificationStatus {
+  QUEUED
+  SENDING
+  SENT
+  FAILED
+  READ
+  CANCELLED
+}
+
+enum RecipientType {
+  STAFF
+  PORTAL_USER
+  CLIENT_CONTACT
+}
+
+enum JobStatus {
+  QUEUED
+  RUNNING
+  DONE
+  FAILED
+}
+
+model File {
+  id                String     @id @default(uuid(7)) @db.Uuid
+  storageKey        String     @unique @map("storage_key") // server generatsiya qiladi: "f/2026/11/<uuid>" — foydalanuvchi yo'li hech qachon
+  bucket            String
+  originalName      String @map("original_name") // sanitizatsiya qilingan
+  mimeType          String @map("mime_type") // magic-bytes bo'yicha aniqlangan
+  sizeBytes         BigInt @map("size_bytes")
+  sha256            String?
+  status            FileStatus @default(PENDING_UPLOAD)
+  uploadedByType    ActorType @map("uploaded_by_type")
+  uploadedById      String?    @db.Uuid @map("uploaded_by_id") // polimorf (soft reference)
+  folderId          String?    @db.Uuid @map("folder_id")
+  previousVersionId String?    @unique @db.Uuid @map("previous_version_id") // versiyalar zanjiri (fayl immutable)
+  retentionUntil    DateTime?  @db.Timestamptz(6) @map("retention_until") // moliyaviy hujjatlar uchun majburiy saqlash
+  createdAt         DateTime   @default(now()) @db.Timestamptz(6) @map("created_at")
+  updatedAt         DateTime   @updatedAt @db.Timestamptz(6) @map("updated_at")
+  deletedAt         DateTime?  @db.Timestamptz(6) @map("deleted_at")
+
+  folder          Folder?           @relation(fields: [folderId], references: [id], onDelete: Restrict)
+  previousVersion File?             @relation("FileVersions", fields: [previousVersionId], references: [id], onDelete: Restrict)
+  nextVersion     File?             @relation("FileVersions")
+  attachments     FileAttachment[]
+  uploadSession   UploadSession?
+  artifacts       ReleaseArtifact[]
+  invoicePdfs     Invoice[]         @relation("InvoicePdf")
+  paymentReceipts Payment[]         @relation("PaymentReceipt")
+  reportJobs      ReportJob[]
+
+  @@index([sha256])
+  @@index([folderId])
+  @@map("files")
+}
+
+model Folder {
+  id        String          @id @default(uuid(7)) @db.Uuid
+  parentId  String?         @db.Uuid @map("parent_id")
+  ownerType FolderOwnerType @map("owner_type")
+  ownerId   String?         @db.Uuid @map("owner_id") // polimorf (soft reference)
+  name      String
+  path      String // materialized path: /<id>/<id>/
+  createdAt DateTime        @default(now()) @db.Timestamptz(6) @map("created_at")
+  updatedAt DateTime        @updatedAt @db.Timestamptz(6) @map("updated_at")
+  deletedAt DateTime?       @db.Timestamptz(6) @map("deleted_at")
+
+  parent   Folder?  @relation("FolderTree", fields: [parentId], references: [id], onDelete: Restrict)
+  children Folder[] @relation("FolderTree")
+  files    File[]
+
+  @@index([path])
+  @@index([ownerType, ownerId])
+  @@unique([parentId, name], map: "folders_name_active_uq", where: raw("deleted_at IS NULL"))
+  @@map("folders")
+}
+
+model FileAttachment {
+  id           String   @id @default(uuid(7)) @db.Uuid
+  fileId       String   @db.Uuid @map("file_id")
+  entityType   String @map("entity_type") // CLIENT|PROJECT|INVOICE|PAYMENT|RELEASE|DEVICE|EXPENSE …
+  entityId     String   @db.Uuid @map("entity_id") // polimorf (soft reference) — orphan tekshiruvi job'i
+  label        String?
+  attachedById String?  @db.Uuid @map("attached_by_id")
+  createdAt    DateTime @default(now()) @db.Timestamptz(6) @map("created_at")
+
+  file File @relation(fields: [fileId], references: [id], onDelete: Restrict)
+
+  @@unique([fileId, entityType, entityId])
+  @@index([entityType, entityId])
+  @@map("file_attachments")
+}
+
+model UploadSession {
+  id             String    @id @default(uuid(7)) @db.Uuid
+  fileId         String    @unique @db.Uuid @map("file_id")
+  s3UploadId     String @map("s3_upload_id")
+  partSize       Int @map("part_size")
+  expectedSize   BigInt @map("expected_size")
+  expectedSha256 String? @map("expected_sha256")
+  status         String // OPEN | COMPLETED | ABORTED | EXPIRED
+  expiresAt      DateTime  @db.Timestamptz(6) @map("expires_at")
+  createdById    String?   @db.Uuid @map("created_by_id")
+  createdAt      DateTime  @default(now()) @db.Timestamptz(6) @map("created_at")
+
+  file File @relation(fields: [fileId], references: [id], onDelete: Restrict)
+
+  @@map("upload_sessions")
+}
+
+model NotificationTemplate {
+  id         String              @id @default(uuid(7)) @db.Uuid
+  eventType  String @map("event_type")
+  channel    NotificationChannel
+  locale     String
+  subject    String?
+  body       String // Handlebars | React Email id | Telegram MarkdownV2
+  isActive   Boolean             @default(true) @map("is_active")
+  rowVersion Int                 @default(1) @map("row_version")
+  updatedAt  DateTime            @updatedAt @db.Timestamptz(6) @map("updated_at")
+
+  @@unique([eventType, channel, locale])
+  @@map("notification_templates")
+}
+
+model Notification {
+  id            String              @id @default(uuid(7)) @db.Uuid
+  eventId       String?             @db.Uuid @map("event_id") // manba outbox event
+  eventType     String @map("event_type")
+  recipientType RecipientType @map("recipient_type")
+  recipientId   String              @db.Uuid @map("recipient_id") // polimorf (soft reference)
+  channel       NotificationChannel
+  status        NotificationStatus  @default(QUEUED)
+  title         String
+  body          String
+  data          Json? // deep-link, entity id
+  dedupeKey     String?             @unique @map("dedupe_key") // `${eventId}:${recipient}:${channel}`
+  attempts      Int                 @default(0)
+  lastError     String? @map("last_error")
+  scheduledAt   DateTime            @default(now()) @db.Timestamptz(6) @map("scheduled_at") // quiet hours / digest
+  sentAt        DateTime?           @db.Timestamptz(6) @map("sent_at")
+  readAt        DateTime?           @db.Timestamptz(6) @map("read_at")
+  createdAt     DateTime            @default(now()) @db.Timestamptz(6) @map("created_at")
+
+  @@index([recipientType, recipientId, status, createdAt])
+  @@index([status, scheduledAt])
+  @@map("notifications")
+}
+
+model NotificationPreference {
+  id            String              @id @default(uuid(7)) @db.Uuid
+  recipientType RecipientType @map("recipient_type")
+  recipientId   String              @db.Uuid @map("recipient_id")
+  eventType     String @map("event_type")
+  channel       NotificationChannel
+  enabled       Boolean
+
+  @@unique([recipientType, recipientId, eventType, channel])
+  @@map("notification_preferences")
+}
+
+model ChannelIdentity {
+  id            String              @id @default(uuid(7)) @db.Uuid
+  recipientType RecipientType @map("recipient_type")
+  recipientId   String              @db.Uuid @map("recipient_id")
+  channel       NotificationChannel
+  externalId    String @map("external_id") // Telegram chat_id
+  verifiedAt    DateTime            @db.Timestamptz(6) @map("verified_at")
+  isActive      Boolean             @default(true) @map("is_active")
+
+  @@unique([channel, externalId])
+  @@unique([recipientType, recipientId, channel])
+  @@map("channel_identities")
+}
+
+model ChannelLinkToken {
+  tokenHash     String              @id @map("token_hash")
+  recipientType RecipientType @map("recipient_type")
+  recipientId   String              @db.Uuid @map("recipient_id")
+  channel       NotificationChannel
+  expiresAt     DateTime            @db.Timestamptz(6) @map("expires_at") // 10 daqiqa, bir martalik
+  usedAt        DateTime?           @db.Timestamptz(6) @map("used_at")
+
+  @@map("channel_link_tokens")
+}
+
+model MetricSnapshot {
+  id         String   @id @default(uuid(7)) @db.Uuid
+  date       DateTime @db.Date
+  metric     String // mrr | active_subs | devices_online | deploy_success_rate …
+  dimension  String // all | project:<id> | currency:USD
+  value      Decimal  @db.Decimal(20, 4) // hosila ko'rsatkich (pul emas)
+  currency   Currency?
+  computedAt DateTime @default(now()) @db.Timestamptz(6) @map("computed_at")
+
+  @@unique([date, metric, dimension])
+  @@map("metric_snapshots")
+}
+
+model ReportJob {
+  id            String    @id @default(uuid(7)) @db.Uuid
+  type          String
+  params        Json
+  status        JobStatus @default(QUEUED)
+  fileId        String?   @db.Uuid @map("file_id")
+  requestedById String    @db.Uuid @map("requested_by_id")
+  createdAt     DateTime  @default(now()) @db.Timestamptz(6) @map("created_at")
+  finishedAt    DateTime? @db.Timestamptz(6) @map("finished_at")
+  expiresAt     DateTime? @db.Timestamptz(6) @map("expires_at")
+
+  file        File? @relation(fields: [fileId], references: [id], onDelete: Restrict)
+  requestedBy User  @relation("ReportRequestedBy", fields: [requestedById], references: [id], onDelete: Restrict)
+
+  @@index([requestedById, createdAt])
+  @@map("report_jobs")
+}
+
+model SavedView {
+  id       String  @id @default(uuid(7)) @db.Uuid
+  userId   String  @db.Uuid @map("user_id")
+  resource String // "clients", "invoices" …
+  name     String
+  filters  Json
+  columns  Json
+  isShared Boolean @default(false) @map("is_shared")
+
+  user User @relation("SavedViewOwner", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, resource, name])
+  @@map("saved_views")
+}
+
+model OutboxEvent {
+  id            String    @id @default(uuid(7)) @db.Uuid
+  type          String
+  eventKey      String    @unique @map("event_key") // dedupe: "invoice.finalized:<id>" — retry'da dublikat yo'q
+  version       Int       @default(1)
+  aggregateType String @map("aggregate_type")
+  aggregateId   String    @db.Uuid @map("aggregate_id")
+  payload       Json
+  correlationId String? @map("correlation_id")
+  occurredAt    DateTime  @default(now()) @db.Timestamptz(6) @map("occurred_at")
+  publishedAt   DateTime? @db.Timestamptz(6) @map("published_at")
+  attempts      Int       @default(0)
+  lastError     String? @map("last_error")
+
+  @@index([occurredAt], map: "outbox_events_unpublished_idx", where: raw("published_at IS NULL"))
+  @@map("outbox_events")
+}
+
+model ProcessedEvent {
+  consumer    String
+  eventId     String   @db.Uuid @map("event_id")
+  processedAt DateTime @default(now()) @db.Timestamptz(6) @map("processed_at")
+
+  @@id([consumer, eventId])
+  @@map("processed_events")
+}
+
+model IdempotencyRecord {
+  scope        String // actor + route
+  key          String
+  requestHash  String @map("request_hash")
+  status       String // IN_PROGRESS | COMPLETED
+  responseCode Int? @map("response_code")
+  responseBody Json? @map("response_body")
+  createdAt    DateTime @default(now()) @db.Timestamptz(6) @map("created_at")
+  expiresAt    DateTime @db.Timestamptz(6) @map("expires_at")
+
+  @@id([scope, key])
+  @@map("idempotency_records")
+}
+
+model Setting {
+  key         String   @id
+  value       Json // isSecret bo'lsa shifrlangan
+  isSecret    Boolean  @default(false) @map("is_secret")
+  updatedById String?  @db.Uuid @map("updated_by_id")
+  rowVersion  Int      @default(1) @map("row_version")
+  updatedAt   DateTime @updatedAt @db.Timestamptz(6) @map("updated_at")
+
+  updatedBy User? @relation("SettingUpdatedBy", fields: [updatedById], references: [id], onDelete: Restrict)
+
+  @@map("settings")
+}
+
+model FeatureFlag {
+  key       String   @id
+  enabled   Boolean  @default(false)
+  rules     Json?
+  updatedAt DateTime @updatedAt @db.Timestamptz(6) @map("updated_at")
+
+  @@map("feature_flags")
+}

@@ -1,0 +1,299 @@
+// ─── CRM (mijozlar) va Projects (loyihalar) — M:N yadrosi: ClientProject ───
+
+enum ClientType {
+  COMPANY
+  INDIVIDUAL
+}
+
+enum ClientStatus {
+  LEAD
+  ACTIVE
+  SUSPENDED
+  CHURNED
+  ARCHIVED
+}
+
+enum TagScope {
+  CLIENT
+  DEVICE
+}
+
+enum ProjectStatus {
+  PLANNING
+  IN_DEVELOPMENT
+  ACTIVE
+  MAINTENANCE
+  DEPRECATED
+  ARCHIVED
+}
+
+enum ProjectMemberRole {
+  LEAD
+  DEVELOPER
+  QA
+  SUPPORT
+}
+
+enum ClientProjectStatus {
+  PROSPECT
+  ONBOARDING
+  ACTIVE
+  SUSPENDED
+  CHURNED
+}
+
+enum Platform {
+  WINDOWS
+  LINUX
+  ANDROID
+  ESP_IDF // ESP32 oilasi (FreeRTOS)
+}
+
+/// Komponent qayerda va qanday ishlaydi
+enum ComponentRuntime {
+  SERVER_SERVICE // fon servisi: systemd / Windows Service (VPS, lokal server, Raspberry Pi)
+  CONTAINER_STACK // Docker Compose stack (VPS, GPU server)
+  STATIC_WEB // statik web build
+  DESKTOP_APP // Windows/Linux desktop ilova
+  FIRMWARE // ESP32 va boshqa mikrokontrollerlar
+  AI_MODEL // model og'irliklari / data bundle
+  MOBILE_APP // Android (keyingi bosqich)
+}
+
+model Client {
+  id               String       @id @default(uuid(7)) @db.Uuid
+  code             String       @unique // CL-000042
+  type             ClientType
+  legalName        String @map("legal_name")
+  displayName      String @map("display_name")
+  tin              String?      @db.VarChar(9) // STIR — CHECK '^\d{9}$'
+  pinflEnc         Bytes? @map("pinfl_enc") // JSHSHIR (14 raqam) — shifrlangan
+  pinflHash        String? @map("pinfl_hash") // HMAC blind index
+  vatPayer         Boolean      @default(false) @map("vat_payer")
+  legalAddress     String? @map("legal_address")
+  region           String?
+  bankName         String? @map("bank_name")
+  bankMfo          String?      @db.VarChar(5) @map("bank_mfo")
+  bankAccount      String?      @db.VarChar(20) @map("bank_account")
+  billingEmail     String? @map("billing_email")
+  phone            String?
+  preferredLocale  String       @default("uz") @map("preferred_locale")
+  billingCurrency  Currency     @default(UZS) @map("billing_currency")
+  accountNo        String       @unique @db.VarChar(8) @map("account_no") // Luhn; Payme/Click/Uzum ilovasida kiritiladigan shaxsiy hisob
+  isResident       Boolean      @default(true) @map("is_resident") // valyuta qonunchiligi: rezident → UZS'da hisob-kitob
+  status           ClientStatus @default(LEAD)
+  accountManagerId String?      @db.Uuid @map("account_manager_id")
+  rowVersion       Int          @default(1) @map("row_version")
+  createdAt        DateTime     @default(now()) @db.Timestamptz(6) @map("created_at")
+  updatedAt        DateTime     @updatedAt @db.Timestamptz(6) @map("updated_at")
+  deletedAt        DateTime?    @db.Timestamptz(6) @map("deleted_at")
+
+  accountManager   User?             @relation("ClientAccountManager", fields: [accountManagerId], references: [id], onDelete: Restrict)
+  contacts         ClientContact[]
+  sites            ClientSite[]
+  clientNotes      ClientNote[]
+  tags             ClientTag[]
+  projects         ClientProject[]
+  portalUsers      PortalUser[]
+  subscriptions    Subscription[]
+  invoices         Invoice[]
+  payments         Payment[]
+  paymentOrders    PaymentOrder[]
+  devices          Device[]
+  enrollmentTokens EnrollmentToken[]
+  journalLines     JournalLine[]
+  mrrMovements     MrrMovement[]
+
+  requests ClientRequest[]
+
+  checkoutOrders CheckoutOrder[]
+  paymentCards   PaymentCard[]
+
+  @@unique([tin], map: "clients_tin_active_uq", where: raw("deleted_at IS NULL"))
+  @@unique([pinflHash], map: "clients_pinfl_active_uq", where: raw("deleted_at IS NULL"))
+  @@index([status])
+  @@index([accountManagerId])
+  @@index([legalName(ops: raw("gin_trgm_ops")), displayName(ops: raw("gin_trgm_ops"))], type: Gin, map: "clients_search_trgm_idx") // global qidiruv (pg_trgm)
+  @@map("clients")
+}
+
+model ClientContact {
+  id        String    @id @default(uuid(7)) @db.Uuid
+  clientId  String    @db.Uuid @map("client_id")
+  fullName  String @map("full_name")
+  position  String?
+  phone     String?
+  email     String?
+  telegram  String?
+  isPrimary Boolean   @default(false) @map("is_primary")
+  isBilling Boolean   @default(false) @map("is_billing")
+  createdAt DateTime  @default(now()) @db.Timestamptz(6) @map("created_at")
+  updatedAt DateTime  @updatedAt @db.Timestamptz(6) @map("updated_at")
+  deletedAt DateTime? @db.Timestamptz(6) @map("deleted_at")
+
+  client     Client      @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  portalUser PortalUser?
+
+  @@index([clientId])
+  @@unique([clientId], map: "client_contacts_one_primary_uq", where: raw("is_primary AND deleted_at IS NULL"))
+  @@map("client_contacts")
+}
+
+model ClientSite {
+  id                String    @id @default(uuid(7)) @db.Uuid
+  clientId          String    @db.Uuid @map("client_id")
+  name              String
+  address           String?
+  region            String?
+  timezone          String    @default("Asia/Tashkent")
+  maintenanceWindow Json? @map("maintenance_window") // {days:[1..7], from:"02:00", to:"05:00"}
+  createdAt         DateTime  @default(now()) @db.Timestamptz(6) @map("created_at")
+  updatedAt         DateTime  @updatedAt @db.Timestamptz(6) @map("updated_at")
+  deletedAt         DateTime? @db.Timestamptz(6) @map("deleted_at")
+
+  client           Client            @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  devices          Device[]
+  enrollmentTokens EnrollmentToken[]
+
+  @@unique([id, clientId]) // composite FK nishoni
+  @@unique([clientId, name], map: "client_sites_name_active_uq", where: raw("deleted_at IS NULL"))
+  @@map("client_sites")
+}
+
+model ClientNote {
+  id        String   @id @default(uuid(7)) @db.Uuid
+  clientId  String   @db.Uuid @map("client_id")
+  authorId  String   @db.Uuid @map("author_id")
+  body      String
+  pinned    Boolean  @default(false)
+  createdAt DateTime @default(now()) @db.Timestamptz(6) @map("created_at")
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  author User   @relation("ClientNoteAuthor", fields: [authorId], references: [id], onDelete: Restrict)
+
+  @@index([clientId, createdAt])
+  @@map("client_notes")
+}
+
+model Tag {
+  id    String   @id @default(uuid(7)) @db.Uuid
+  scope TagScope
+  name  String
+  color String?
+
+  clients ClientTag[]
+  devices DeviceTag[]
+
+  @@unique([scope, name])
+  @@map("tags")
+}
+
+model ClientTag {
+  clientId String @db.Uuid @map("client_id")
+  tagId    String @db.Uuid @map("tag_id")
+
+  client Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  tag    Tag    @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([clientId, tagId])
+  @@map("client_tags")
+}
+
+model Project {
+  id                 String        @id @default(uuid(7)) @db.Uuid
+  code               String        @unique // slug: "pos-retail" (TUF yo'llarida ham ishlatiladi)
+  name               String
+  description        String?
+  status             ProjectStatus @default(PLANNING)
+  ownerId            String?       @db.Uuid @map("owner_id")
+  repositoryUrl      String? @map("repository_url")
+  supportedPlatforms Platform[] @map("supported_platforms")
+  isInternal         Boolean       @default(false) @map("is_internal") // masalan, "ads-agent" — agentning o'zi
+  rowVersion         Int           @default(1) @map("row_version")
+  createdAt          DateTime      @default(now()) @db.Timestamptz(6) @map("created_at")
+  updatedAt          DateTime      @updatedAt @db.Timestamptz(6) @map("updated_at")
+  deletedAt          DateTime?     @db.Timestamptz(6) @map("deleted_at")
+
+  owner        User?            @relation("ProjectOwner", fields: [ownerId], references: [id], onDelete: Restrict)
+  components   ProjectComponent[]
+  members      ProjectMember[]
+  clients      ClientProject[]
+  plans        Plan[]
+  channels     ReleaseChannel[]
+  releases     Release[]
+  deployments  Deployment[]
+  mrrMovements MrrMovement[]
+  journalLines JournalLine[]
+  expenses     Expense[]
+
+  checkoutOrders CheckoutOrder[]
+
+  @@map("projects")
+}
+
+/// Loyiha qismi: masalan "pos-server" (VPS), "edge-ai" (GPU server), "sensor-fw" (ESP32).
+/// Versiyalar (Release) komponent bo'yicha chiqariladi; mosligi TUF `requires` orqali.
+model ProjectComponent {
+  id                 String           @id @default(uuid(7)) @db.Uuid
+  projectId          String           @db.Uuid @map("project_id")
+  key                String // slug — TUF yo'lida ishlatiladi
+  name               String
+  description        String?
+  runtime            ComponentRuntime
+  supportedPlatforms Platform[] @map("supported_platforms")
+  isActive           Boolean          @default(true) @map("is_active")
+  createdAt          DateTime         @default(now()) @db.Timestamptz(6) @map("created_at")
+  updatedAt          DateTime         @updatedAt @db.Timestamptz(6) @map("updated_at")
+
+  project       Project              @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  releases      Release[]
+  installations DeviceInstallation[]
+  deployments   Deployment[]
+
+  @@unique([projectId, key])
+  @@unique([id, projectId]) // composite FK nishoni
+  @@map("project_components")
+}
+
+model ProjectMember {
+  projectId String            @db.Uuid @map("project_id")
+  userId    String            @db.Uuid @map("user_id")
+  role      ProjectMemberRole
+  addedAt   DateTime          @default(now()) @db.Timestamptz(6) @map("added_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation("ProjectMemberUser", fields: [userId], references: [id], onDelete: Restrict)
+
+  @@id([projectId, userId])
+  @@index([userId])
+  @@map("project_members")
+}
+
+/// M:N — birinchi darajali entity. Obunalar, o'rnatmalar va entitlement shu yerga osiladi.
+model ClientProject {
+  id               String              @id @default(uuid(7)) @db.Uuid
+  clientId         String              @db.Uuid @map("client_id")
+  projectId        String              @db.Uuid @map("project_id")
+  status           ClientProjectStatus @default(ONBOARDING)
+  startedOn        DateTime?           @db.Date @map("started_on")
+  endedOn          DateTime?           @db.Date @map("ended_on") // CHECK ended_on >= started_on
+  accountManagerId String?             @db.Uuid @map("account_manager_id")
+  defaultChannelId String?             @db.Uuid @map("default_channel_id") // yangi qurilmalar uchun (odatda stable)
+  notes            String?
+  rowVersion       Int                 @default(1) @map("row_version")
+  createdAt        DateTime            @default(now()) @db.Timestamptz(6) @map("created_at")
+  updatedAt        DateTime            @updatedAt @db.Timestamptz(6) @map("updated_at")
+
+  client         Client               @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  project        Project              @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  accountManager User?                @relation("ClientProjectAccountManager", fields: [accountManagerId], references: [id], onDelete: Restrict)
+  defaultChannel ReleaseChannel?      @relation(fields: [defaultChannelId, projectId], references: [id, projectId], onDelete: Restrict)
+  subscriptions  Subscription[]
+  installations  DeviceInstallation[]
+
+  @@unique([clientId, projectId])
+  @@unique([id, clientId]) // composite FK nishoni (subscriptions)
+  @@unique([id, clientId, projectId]) // composite FK nishoni (device_installations)
+  @@index([projectId, status])
+  @@map("client_projects")
+}

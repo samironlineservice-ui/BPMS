@@ -1,0 +1,37 @@
+{
+  "name": "@ads/db",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "start": "node scripts/pg.mjs start",
+    "stop": "node scripts/pg.mjs stop",
+    "status": "node scripts/pg.mjs status",
+    "psql": "node scripts/pg.mjs psql",
+    "generate": "prisma generate",
+    "migrate": "prisma migrate deploy",
+    "reset": "node scripts/pg.mjs reset",
+    "seed": "node dist/seed/run.js",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@prisma/adapter-pg": "7.10.1",
+    "@prisma/client": "7.10.1",
+    "pg": "^8.23.1",
+    "@ads/contracts": "*"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.23.1",
+    "embedded-postgres": "18.6.0-beta.19",
+    "prisma": "7.10.1",
+    "vitest": "^5.1.0"
+  }
+}

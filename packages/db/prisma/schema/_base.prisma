@@ -1,0 +1,15 @@
+// ADS-ERP — Prisma schema (multi-file). Konvensiyalar: docs/architecture/database/prisma-schema.md
+// Ustun nomlari: camelCase maydon → @map("snake_case"); jadval nomlari: @@map("snake_case_plural").
+// CHECK / EXCLUDE / trigger / partitioning / RLS — docs/architecture/database/integrity.sql
+
+generator client {
+  provider            = "prisma-client"
+  output              = "../../src/generated/prisma"
+  moduleFormat        = "esm"
+  importFileExtension = "js"
+  previewFeatures     = ["partialIndexes"]
+}
+
+datasource db {
+  provider = "postgresql"
+}

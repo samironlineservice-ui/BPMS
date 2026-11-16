@@ -1,0 +1,76 @@
+// ── Mijoz murojaatlari (kabinetdan yoki xodim tomonidan mijoz nomidan) ──
+
+enum ClientRequestStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+enum ClientRequestCategory {
+  SUPPORT
+  CHANGE
+  BILLING
+  DEVICE
+  OTHER
+}
+
+enum MessageAuthor {
+  CLIENT
+  STAFF
+}
+
+model ClientRequest {
+  id                    String                @id @default(uuid(7)) @db.Uuid
+  code                  String                @unique
+  clientId              String                @map("client_id") @db.Uuid
+  category              ClientRequestCategory
+  subject               String
+  status                ClientRequestStatus   @default(OPEN)
+  subscriptionId        String?               @map("subscription_id") @db.Uuid
+  deviceId              String?               @map("device_id") @db.Uuid
+  createdByPortalUserId String?               @map("created_by_portal_user_id") @db.Uuid
+  createdByUserId       String?               @map("created_by_user_id") @db.Uuid
+  assigneeId            String?               @map("assignee_id") @db.Uuid
+  lastMessageAt         DateTime              @default(now()) @map("last_message_at") @db.Timestamptz(6)
+  lastMessageBy         MessageAuthor         @default(CLIENT) @map("last_message_by")
+  staffSeenAt           DateTime?             @map("staff_seen_at") @db.Timestamptz(6)
+  clientSeenAt          DateTime?             @map("client_seen_at") @db.Timestamptz(6)
+  closedAt              DateTime?             @map("closed_at") @db.Timestamptz(6)
+  rowVersion            Int                   @default(1) @map("row_version")
+  createdAt             DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime              @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  client              Client                 @relation(fields: [clientId], references: [id])
+  subscription        Subscription?          @relation(fields: [subscriptionId], references: [id])
+  device              Device?                @relation(fields: [deviceId], references: [id])
+  createdByPortalUser PortalUser?            @relation(fields: [createdByPortalUserId], references: [id])
+  createdByUser       User?                  @relation("RequestCreatedBy", fields: [createdByUserId], references: [id])
+  assignee            User?                  @relation("RequestAssignee", fields: [assigneeId], references: [id])
+  messages            ClientRequestMessage[]
+
+  @@index([clientId, status])
+  @@index([status, lastMessageAt])
+  @@map("client_requests")
+}
+
+/// Append-only. isInternal — xodimlar ichki izohi (mijozga ko'rinmaydi, RLS).
+model ClientRequestMessage {
+  id                 String        @id @default(uuid(7)) @db.Uuid
+  requestId          String        @map("request_id") @db.Uuid
+  clientId           String        @map("client_id") @db.Uuid
+  author             MessageAuthor
+  authorUserId       String?       @map("author_user_id") @db.Uuid
+  authorPortalUserId String?       @map("author_portal_user_id") @db.Uuid
+  authorName         String        @map("author_name")
+  body               String
+  isInternal         Boolean       @default(false) @map("is_internal")
+  createdAt          DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  request          ClientRequest @relation(fields: [requestId], references: [id])
+  authorUser       User?         @relation(fields: [authorUserId], references: [id], onDelete: Restrict)
+  authorPortalUser PortalUser?   @relation(fields: [authorPortalUserId], references: [id], onDelete: Restrict)
+
+  @@index([requestId, createdAt])
+  @@map("client_request_messages")
+}

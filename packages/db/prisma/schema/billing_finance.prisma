@@ -1,0 +1,739 @@
+// ─── Billing (obunalar, invoice, to'lovlar), Gateways (Payme/Click/Uzum), Finance (ledger, FX) ───
+// Pul: BigInt minor units (tiyin/sent). Kurs: Decimal(18,6) — doim "1 USD = X UZS".
+
+enum Currency {
+  UZS
+  USD
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  SUSPENDED
+  CANCELLED
+  EXPIRED
+}
+
+enum RevisionChange {
+  CREATED
+  PLAN_CHANGE
+  QUANTITY_CHANGE
+  PRICE_CHANGE
+  STATUS_CHANGE
+}
+
+enum MrrMovementType {
+  NEW
+  EXPANSION
+  CONTRACTION
+  CHURN
+  REACTIVATION
+}
+
+/// "Qisman to'langan" — saqlanmaydi, hosila: paidMinor > 0 va status = OPEN.
+enum InvoiceStatus {
+  DRAFT
+  OPEN
+  PAID
+  VOID
+  UNCOLLECTIBLE
+}
+
+enum InvoiceKind {
+  RECURRING
+  PRORATION
+  ONE_TIME
+}
+
+enum InvoiceLineType {
+  SUBSCRIPTION
+  PRORATION
+  ONE_TIME
+  DISCOUNT
+}
+
+enum PaymentMethod {
+  PAYME
+  CLICK
+  UZUM
+  PAYNET
+  CASH
+  BANK_TRANSFER
+  CARD_TERMINAL
+}
+
+enum PaymentStatus {
+  PENDING_APPROVAL
+  POSTED
+  REJECTED
+}
+
+enum RefundStatus {
+  REQUESTED
+  APPROVED
+  SUCCEEDED
+  FAILED
+}
+
+enum GatewayProvider {
+  PAYME
+  CLICK
+  UZUM
+  PAYNET
+}
+
+enum GatewayTxState {
+  PENDING
+  SUCCEEDED
+  CANCELLED
+  REFUNDED
+}
+
+enum PaymentOrderKind {
+  FIXED
+  OPEN_TOPUP
+}
+
+enum FxSource {
+  CBU
+  MANUAL
+}
+
+enum BillingRunStatus {
+  RUNNING
+  COMPLETED
+  COMPLETED_WITH_ERRORS
+  FAILED
+}
+
+enum LedgerAccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  REVENUE
+  EXPENSE
+}
+
+// ── Tariflar ──
+
+model Plan {
+  id             String   @id @default(uuid(7)) @db.Uuid
+  projectId      String   @db.Uuid @map("project_id")
+  code           String
+  name           String
+  description    String?
+  intervalMonths Int      @default(1) @map("interval_months")
+  isActive       Boolean  @default(true) @map("is_active")
+  /// Mijoz kabinetidagi katalogda ko'rsatiladi (o'zi tanlab, onlayn to'lab ulanadi)
+  isPublic       Boolean  @default(false) @map("is_public")
+  features       String[] @default([])
+  sortOrder      Int      @default(0) @map("sort_order")
+  createdAt      DateTime @default(now()) @db.Timestamptz(6) @map("created_at")
+  updatedAt      DateTime @updatedAt @db.Timestamptz(6) @map("updated_at")
+
+  project Project     @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  prices  PlanPrice[]
+
+  @@unique([projectId, code])
+  @@map("plans")
+}
+
+/// Narx tarixi — eski narx o'zgartirilmaydi. EXCLUDE: (plan_id, currency, daterange) ustma-ust emas.
+model PlanPrice {
+  id              String    @id @default(uuid(7)) @db.Uuid
+  planId          String    @db.Uuid @map("plan_id")
+  currency        Currency
+  unitAmountMinor BigInt @map("unit_amount_minor")
+  vatRateBp       Int       @default(0) @map("vat_rate_bp") // 1200 = 12%; hozircha firma yo'q → 0
+  ikpuCode        String?   @db.VarChar(17) @map("ikpu_code") // integratsiya bosqichida (fiskalizatsiya)
+  packageCode     String? @map("package_code")
+  validFrom       DateTime  @db.Date @map("valid_from")
+  validTo         DateTime? @db.Date @map("valid_to") // exclusive
+  createdById     String    @db.Uuid @map("created_by_id")
+  createdAt       DateTime  @default(now()) @db.Timestamptz(6) @map("created_at")
+
+  plan          Plan                       @relation(fields: [planId], references: [id], onDelete: Restrict)
+  createdBy     User                       @relation("PlanPriceCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  revisionItems SubscriptionRevisionItem[]
+  invoiceLines  InvoiceLine[]
+
+  @@unique([id, currency]) // composite FK nishoni
+  @@index([planId, currency, validFrom])
+  @@map("plan_prices")
+}
+
+// ── Obunalar ──
+
+model Subscription {
+  id                 String             @id @default(uuid(7)) @db.Uuid
+  code               String             @unique // SUB-000123
+  clientId           String             @db.Uuid @map("client_id")
+  clientProjectId    String             @db.Uuid @map("client_project_id")
+  currency           Currency // umrbod o'zgarmaydi (trigger)
+  status             SubscriptionStatus // o'tishlar — trigger jadvali
+  trialEndsOn        DateTime?          @db.Date @map("trial_ends_on")
+  currentPeriodStart DateTime?          @db.Date @map("current_period_start")
+  currentPeriodEnd   DateTime?          @db.Date @map("current_period_end") // exclusive
+  nextBillingOn      DateTime?          @db.Date @map("next_billing_on")
+  paymentTermsDays   Int                @default(10) @map("payment_terms_days")
+  graceDays          Int                @default(15) @map("grace_days")
+  pastDueSince       DateTime?          @db.Date @map("past_due_since")
+  cancelAtPeriodEnd  Boolean            @default(false) @map("cancel_at_period_end")
+  pendingChange      Json?              @map("pending_change") // keyingi davrdan kuchga kiradigan o'zgarish (billing run qo'llaydi)
+  endedAt            DateTime?          @db.Timestamptz(6) @map("ended_at")
+  rowVersion         Int                @default(1) @map("row_version")
+  createdAt          DateTime           @default(now()) @db.Timestamptz(6) @map("created_at")
+  updatedAt          DateTime           @updatedAt @db.Timestamptz(6) @map("updated_at")
+
+  client        Client                 @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  clientProject ClientProject          @relation(fields: [clientProjectId, clientId], references: [id, clientId], onDelete: Restrict)
+  revisions     SubscriptionRevision[]
+  invoices      Invoice[]
+  mrrSnapshots  MrrSnapshot[]
+
+  requests ClientRequest[]
+
+  checkoutOrders CheckoutOrder[]
+
+  @@unique([id, currency])
+  @@unique([id, clientId, currency])
+  @@index([status, nextBillingOn])
+  @@index([clientId])
+  @@index([clientProjectId])
+  @@unique([clientProjectId], map: "subscriptions_one_live_uq", where: raw("status <> 'CANCELLED' AND status <> 'EXPIRED'")) // bitta tirik obuna
+  @@map("subscriptions")
+}
+
+/// Shartlar tarixi: ustma-ust tushmaydigan vaqt oraliqlari (EXCLUDE). Append-only — faqat validTo bir marta yopiladi.
+model SubscriptionRevision {
+  id             String             @id @default(uuid(7)) @db.Uuid
+  subscriptionId String             @db.Uuid @map("subscription_id")
+  revisionNo     Int @map("revision_no")
+  currency       Currency
+  validFrom      DateTime           @db.Timestamptz(6) @map("valid_from")
+  validTo        DateTime?          @db.Timestamptz(6) @map("valid_to") // exclusive; NULL = joriy
+  status         SubscriptionStatus
+  mrrMinor       BigInt @map("mrr_minor") // oylikka normallashtirilgan, chegirmadan keyin, QQSsiz
+  changeType     RevisionChange @map("change_type")
+  reason         String?
+  actorType      ActorType? @map("actor_type")
+  actorId        String?            @db.Uuid @map("actor_id") // staff yoki SYSTEM (dunning) — soft reference
+  createdAt      DateTime           @default(now()) @db.Timestamptz(6) @map("created_at")
+
+  subscription      Subscription               @relation(fields: [subscriptionId, currency], references: [id, currency], onDelete: Restrict)
+  items             SubscriptionRevisionItem[]
+  movement          MrrMovement?
+  prorationInvoices Invoice[]                  @relation("InvoiceRevision")
+
+  @@unique([subscriptionId, revisionNo])
+  @@unique([id, currency])
+  @@index([subscriptionId, validFrom])
+  @@unique([subscriptionId], map: "subscription_revisions_one_open_uq", where: raw("valid_to IS NULL")) // bitta ochiq revision
+  @@map("subscription_revisions")
+}
+
+model SubscriptionRevisionItem {
+  id              String   @id @default(uuid(7)) @db.Uuid
+  revisionId      String   @db.Uuid @map("revision_id")
+  currency        Currency
+  planPriceId     String   @db.Uuid @map("plan_price_id")
+  quantity        Int
+  unitAmountMinor BigInt @map("unit_amount_minor") // snapshot yoki kelishilgan narx
+  discountBp      Int      @default(0) @map("discount_bp")
+
+  revision  SubscriptionRevision @relation(fields: [revisionId, currency], references: [id, currency], onDelete: Restrict)
+  planPrice PlanPrice            @relation(fields: [planPriceId, currency], references: [id, currency], onDelete: Restrict)
+
+  @@unique([revisionId, planPriceId])
+  @@map("subscription_revision_items")
+}
+
+model MrrMovement {
+  id         String          @id @default(uuid(7)) @db.Uuid
+  revisionId String          @unique @db.Uuid @map("revision_id")
+  clientId   String          @db.Uuid @map("client_id")
+  projectId  String          @db.Uuid @map("project_id")
+  occurredAt DateTime        @db.Timestamptz(6) @map("occurred_at")
+  type       MrrMovementType
+  currency   Currency
+  deltaMinor BigInt @map("delta_minor")
+
+  revision SubscriptionRevision @relation(fields: [revisionId], references: [id], onDelete: Restrict)
+  client   Client               @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  project  Project              @relation(fields: [projectId], references: [id], onDelete: Restrict)
+
+  @@index([occurredAt])
+  @@index([clientId, occurredAt])
+  @@map("mrr_movements")
+}
+
+model BillingRun {
+  id         String           @id @default(uuid(7)) @db.Uuid
+  runDate    DateTime         @unique @db.Date @map("run_date")
+  status     BillingRunStatus @default(RUNNING)
+  enqueued   Int              @default(0)
+  invoiced   Int              @default(0)
+  failed     Int              @default(0)
+  errors     Json?
+  startedAt  DateTime         @db.Timestamptz(6) @map("started_at")
+  finishedAt DateTime?        @db.Timestamptz(6) @map("finished_at")
+
+  invoices Invoice[]
+
+  @@map("billing_runs")
+}
+
+// ── Invoice'lar ──
+
+model Invoice {
+  id                    String        @id @default(uuid(7)) @db.Uuid
+  number                String?       @unique // finalizatsiyada: INV-2026-000123
+  kind                  InvoiceKind
+  status                InvoiceStatus @default(DRAFT)
+  clientId              String        @db.Uuid @map("client_id")
+  subscriptionId        String?       @db.Uuid @map("subscription_id")
+  revisionId            String?       @db.Uuid @map("revision_id") // PRORATION idempotency kaliti
+  billingRunId          String?       @db.Uuid @map("billing_run_id")
+  currency              Currency
+  periodStart           DateTime?     @db.Date @map("period_start")
+  periodEnd             DateTime?     @db.Date @map("period_end")
+  issueDate             DateTime?     @db.Date @map("issue_date")
+  dueDate               DateTime?     @db.Date @map("due_date")
+  subtotalMinor         BigInt        @default(0) @map("subtotal_minor")
+  vatMinor              BigInt        @default(0) @map("vat_minor")
+  totalMinor            BigInt        @default(0) @map("total_minor")
+  paidMinor             BigInt        @default(0) @map("paid_minor") // FAQAT trigger (Σ allocations)
+  creditedMinor         BigInt        @default(0) @map("credited_minor") // FAQAT trigger (Σ credit notes)
+  fxRateId              String?       @db.Uuid @map("fx_rate_id")
+  fxRate                Decimal?      @db.Decimal(18, 6) @map("fx_rate") // USD: issue kunidagi CBU kursi
+  totalUzsMinor         BigInt? @map("total_uzs_minor") // carrying value
+  clientSnapshot        Json? @map("client_snapshot") // finalizatsiya paytidagi rekvizitlar
+  pdfFileId             String?       @db.Uuid @map("pdf_file_id")
+  overdueNotifiedAt     DateTime?     @db.Timestamptz(6) @map("overdue_notified_at")
+  finalizedAt           DateTime?     @db.Timestamptz(6) @map("finalized_at")
+  voidedAt              DateTime?     @db.Timestamptz(6) @map("voided_at")
+  voidReason            String? @map("void_reason")
+  voidApprovalRequestId String?       @db.Uuid @map("void_approval_request_id")
+  rowVersion            Int           @default(1) @map("row_version")
+  createdAt             DateTime      @default(now()) @db.Timestamptz(6) @map("created_at")
+  updatedAt             DateTime      @updatedAt @db.Timestamptz(6) @map("updated_at")
+
+  client         Client                @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  subscription   Subscription?         @relation(fields: [subscriptionId, clientId, currency], references: [id, clientId, currency], onDelete: Restrict)
+  revision       SubscriptionRevision? @relation("InvoiceRevision", fields: [revisionId, currency], references: [id, currency], onDelete: Restrict)
+  billingRun     BillingRun?           @relation(fields: [billingRunId], references: [id], onDelete: Restrict)
+  fxRateRef      FxRate?               @relation("InvoiceFxRate", fields: [fxRateId], references: [id], onDelete: Restrict)
+  pdfFile        File?                 @relation("InvoicePdf", fields: [pdfFileId], references: [id], onDelete: Restrict)
+  voidApproval   ApprovalRequest?      @relation("InvoiceVoidApproval", fields: [voidApprovalRequestId], references: [id], onDelete: Restrict)
+  lines          InvoiceLine[]
+  allocations    Allocation[]
+  creditNotes    CreditNote[]
+  orderTargets   PaymentOrderTarget[]
+  agingSnapshots ArAgingSnapshot[]
+
+  @@unique([id, clientId])
+  @@unique([id, clientId, currency])
+  // Billing run idempotentligining HAQIQIY kafolati:
+  @@unique([subscriptionId, periodStart], map: "invoices_one_recurring_per_period_uq", where: raw("kind = 'RECURRING' AND status <> 'VOID'"))
+  @@unique([revisionId], map: "invoices_one_proration_per_revision_uq", where: raw("kind = 'PRORATION' AND status <> 'VOID'"))
+  @@index([clientId, status, dueDate])
+  @@index([status, dueDate])
+  @@map("invoices")
+}
+
+model InvoiceLine {
+  id              String          @id @default(uuid(7)) @db.Uuid
+  invoiceId       String          @db.Uuid @map("invoice_id")
+  position        Int
+  type            InvoiceLineType
+  description     String
+  planPriceId     String?         @db.Uuid @map("plan_price_id")
+  periodStart     DateTime?       @db.Date @map("period_start")
+  periodEnd       DateTime?       @db.Date @map("period_end")
+  quantity        Int
+  unitAmountMinor BigInt @map("unit_amount_minor")
+  prorationNum    Int             @default(1) @map("proration_num") // hisoblangan kunlar
+  prorationDen    Int             @default(1) @map("proration_den") // oydagi kunlar
+  amountMinor     BigInt @map("amount_minor") // CHECK = round(qty × unit × num / den)
+  vatRateBp       Int             @default(0) @map("vat_rate_bp")
+  vatMinor        BigInt          @default(0) @map("vat_minor") // CHECK = round(amount × bp / 10000)
+  ikpuCode        String?         @db.VarChar(17) @map("ikpu_code")
+  packageCode     String? @map("package_code")
+
+  invoice   Invoice    @relation(fields: [invoiceId], references: [id], onDelete: Cascade) // faqat DRAFT o'chiriladi (trigger)
+  planPrice PlanPrice? @relation(fields: [planPriceId], references: [id], onDelete: Restrict)
+
+  @@unique([invoiceId, position])
+  @@map("invoice_lines")
+}
+
+model CreditNote {
+  id           String   @id @default(uuid(7)) @db.Uuid
+  number       String   @unique // CN-2026-000012
+  invoiceId    String   @db.Uuid @map("invoice_id")
+  clientId     String   @db.Uuid @map("client_id")
+  currency     Currency
+  amountMinor  BigInt @map("amount_minor") // QQS bilan
+  vatMinor     BigInt @map("vat_minor")
+  reason       String
+  issuedAt     DateTime @db.Timestamptz(6) @map("issued_at")
+  createdById  String   @db.Uuid @map("created_by_id")
+  approvedById String   @db.Uuid @map("approved_by_id") // CHECK ≠ createdById
+
+  invoice    Invoice @relation(fields: [invoiceId, clientId, currency], references: [id, clientId, currency], onDelete: Restrict)
+  createdBy  User    @relation("CreditNoteCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  approvedBy User    @relation("CreditNoteApprovedBy", fields: [approvedById], references: [id], onDelete: Restrict)
+
+  @@index([invoiceId])
+  @@map("credit_notes")
+}
+
+// ── To'lovlar ──
+
+model Payment {
+  id                   String        @id @default(uuid(7)) @db.Uuid
+  code                 String        @unique // PAY-2026-000123
+  clientId             String        @db.Uuid @map("client_id")
+  method               PaymentMethod
+  status               PaymentStatus // gateway: darhol POSTED; qo'lda: PENDING_APPROVAL → POSTED (four-eyes)
+  currency             Currency
+  amountMinor          BigInt @map("amount_minor")
+  fxRateId             String?       @db.Uuid @map("fx_rate_id")
+  fxRate               Decimal       @default(1) @db.Decimal(18, 6) @map("fx_rate")
+  amountUzsMinor       BigInt @map("amount_uzs_minor") // qabul sanasidagi carrying value
+  allocatedMinor       BigInt        @default(0) @map("allocated_minor") // FAQAT trigger
+  refundedMinor        BigInt        @default(0) @map("refunded_minor") // FAQAT trigger
+  receivedAt           DateTime      @db.Timestamptz(6) @map("received_at")
+  gatewayTransactionId String?       @unique @db.Uuid @map("gateway_transaction_id")
+  externalRef          String? @map("external_ref") // bank hujjat raqami
+  receiptFileId        String?       @db.Uuid @map("receipt_file_id")
+  notes                String?
+  createdById          String?       @db.Uuid @map("created_by_id")
+  approvedById         String?       @db.Uuid @map("approved_by_id")
+  createdAt            DateTime      @default(now()) @db.Timestamptz(6) @map("created_at")
+
+  client             Client              @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  fxRateRef          FxRate?             @relation("PaymentFxRate", fields: [fxRateId], references: [id], onDelete: Restrict)
+  gatewayTransaction GatewayTransaction? @relation(fields: [gatewayTransactionId], references: [id], onDelete: Restrict)
+  receiptFile        File?               @relation("PaymentReceipt", fields: [receiptFileId], references: [id], onDelete: Restrict)
+  createdBy          User?               @relation("PaymentCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  approvedBy         User?               @relation("PaymentApprovedBy", fields: [approvedById], references: [id], onDelete: Restrict)
+  allocations        Allocation[]
+  refunds            Refund[]
+
+  @@unique([id, clientId, currency])
+  @@unique([method, externalRef], map: "payments_manual_ref_uq", where: raw("external_ref IS NOT NULL AND status <> 'REJECTED'"))
+  @@index([clientId, status])
+  @@index([receivedAt])
+  @@map("payments")
+}
+
+/// Append-only; bekor qilish = aniq manfiy reversal qatori.
+model Allocation {
+  id                 String   @id @default(uuid(7)) @db.Uuid
+  clientId           String   @db.Uuid @map("client_id")
+  paymentId          String   @db.Uuid @map("payment_id")
+  paymentCurrency    Currency @map("payment_currency")
+  invoiceId          String   @db.Uuid @map("invoice_id")
+  invoiceCurrency    Currency @map("invoice_currency")
+  amountPaymentMinor BigInt @map("amount_payment_minor") // > 0 qo'llash, < 0 reversal
+  amountInvoiceMinor BigInt @map("amount_invoice_minor")
+  fxRateId           String?  @db.Uuid @map("fx_rate_id")
+  fxRate             Decimal  @db.Decimal(18, 6) @map("fx_rate") // bir xil valyutada 1
+  settledUzsMinor    BigInt @map("settled_uzs_minor") // to'lov tomonidagi carrying value
+  carryingUzsMinor   BigInt @map("carrying_uzs_minor") // invoice tomonidagi carrying value
+  fxDiffUzsMinor     BigInt @map("fx_diff_uzs_minor") // realized FX: foyda (+) / zarar (−)
+  appliedAt          DateTime @db.Timestamptz(6) @map("applied_at")
+  reversalOfId       String?  @unique @db.Uuid @map("reversal_of_id")
+  createdById        String?  @db.Uuid @map("created_by_id") // staff yoki SYSTEM (allocator) — soft reference
+
+  payment    Payment     @relation(fields: [paymentId, clientId, paymentCurrency], references: [id, clientId, currency], onDelete: Restrict)
+  invoice    Invoice     @relation(fields: [invoiceId, clientId, invoiceCurrency], references: [id, clientId, currency], onDelete: Restrict)
+  fxRateRef  FxRate?     @relation("AllocationFxRate", fields: [fxRateId], references: [id], onDelete: Restrict)
+  reversalOf Allocation? @relation("AllocationReversal", fields: [reversalOfId], references: [id], onDelete: Restrict)
+  reversedBy Allocation? @relation("AllocationReversal")
+
+  @@index([invoiceId])
+  @@index([paymentId])
+  @@map("allocations")
+}
+
+model Refund {
+  id                   String       @id @default(uuid(7)) @db.Uuid
+  paymentId            String       @db.Uuid @map("payment_id")
+  amountMinor          BigInt @map("amount_minor")
+  status               RefundStatus @default(REQUESTED)
+  reason               String
+  gatewayTransactionId String?      @unique @db.Uuid @map("gateway_transaction_id")
+  requestedById        String       @db.Uuid @map("requested_by_id")
+  approvedById         String?      @db.Uuid @map("approved_by_id") // CHECK ≠ requestedById
+  completedAt          DateTime?    @db.Timestamptz(6) @map("completed_at")
+  createdAt            DateTime     @default(now()) @db.Timestamptz(6) @map("created_at")
+
+  payment            Payment             @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+  gatewayTransaction GatewayTransaction? @relation(fields: [gatewayTransactionId], references: [id], onDelete: Restrict)
+  requestedBy        User                @relation("RefundRequestedBy", fields: [requestedById], references: [id], onDelete: Restrict)
+  approvedBy         User?               @relation("RefundApprovedBy", fields: [approvedById], references: [id], onDelete: Restrict)
+
+  @@index([paymentId])
+  @@map("refunds")
+}
+
+// ── Gateways ──
+
+/// FIXED — portal/Telegram checkout (summa va kurs qulflangan); OPEN_TOPUP — mijoz accountNo bilan balans to'ldiradi.
+model PaymentOrder {
+  id          String           @id @default(uuid(7)) @db.Uuid
+  number      String           @unique @db.VarChar(12) // tasodifiy + Luhn: gateway account / merchant_trans_id
+  kind        PaymentOrderKind
+  clientId    String           @db.Uuid @map("client_id")
+  amountMinor BigInt? @map("amount_minor") // UZS; OPEN_TOPUP'da NULL
+  fxRateId    String?          @db.Uuid @map("fx_rate_id")
+  fxRate      Decimal?         @db.Decimal(18, 6) @map("fx_rate") // USD target'lar uchun muzlatilgan kotirovka
+  expiresAt   DateTime         @db.Timestamptz(6) @map("expires_at")
+  createdAt   DateTime         @default(now()) @db.Timestamptz(6) @map("created_at")
+  purpose      PaymentOrderPurpose @default(INVOICES)
+  status       PaymentOrderStatus  @default(PENDING)
+  provider     GatewayProvider?
+  cardId       String?             @db.Uuid @map("card_id")
+  portalUserId String?             @db.Uuid @map("portal_user_id")
+  paidAt       DateTime?           @db.Timestamptz(6) @map("paid_at")
+  failure      String?
+  returnPath   String?             @map("return_path")
+
+  client       Client               @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  fxRateRef    FxRate?              @relation("PaymentOrderFxRate", fields: [fxRateId], references: [id], onDelete: Restrict)
+  card         PaymentCard?         @relation(fields: [cardId], references: [id], onDelete: Restrict)
+  portalUser   PortalUser?          @relation(fields: [portalUserId], references: [id], onDelete: Restrict)
+  checkout     CheckoutOrder?
+  targets      PaymentOrderTarget[]
+  transactions GatewayTransaction[]
+
+  @@unique([id, kind])
+  @@unique([id, clientId])
+  @@map("payment_orders")
+}
+
+model PaymentOrderTarget {
+  orderId            String @db.Uuid @map("order_id")
+  invoiceId          String @db.Uuid @map("invoice_id")
+  clientId           String @db.Uuid @map("client_id") // buyurtma va invoice bitta mijozniki (composite FK)
+  amountInvoiceMinor BigInt @map("amount_invoice_minor")
+  amountUzsMinor     BigInt @map("amount_uzs_minor")
+
+  order   PaymentOrder @relation(fields: [orderId, clientId], references: [id, clientId], onDelete: Restrict)
+  invoice Invoice      @relation(fields: [invoiceId, clientId], references: [id, clientId], onDelete: Restrict)
+
+  @@id([orderId, invoiceId])
+  @@map("payment_order_targets")
+}
+
+model GatewayTransaction {
+  id             String           @id @default(uuid(7)) @db.Uuid
+  seq            BigInt           @unique @default(autoincrement()) // Payme "transaction", Click merchant_prepare_id
+  provider       GatewayProvider
+  externalId     String @map("external_id") // Payme id | click_trans_id | Uzum transId
+  paymentOrderId String           @db.Uuid @map("payment_order_id")
+  orderKind      PaymentOrderKind @map("order_kind")
+  amountMinor    BigInt @map("amount_minor") // UZS tiyin
+  state          GatewayTxState   @default(PENDING)
+  providerTime   DateTime         @db.Timestamptz(6) @map("provider_time") // Payme `time` (12 soat timeout asosi)
+  performedAt    DateTime?        @db.Timestamptz(6) @map("performed_at")
+  cancelledAt    DateTime?        @db.Timestamptz(6) @map("cancelled_at")
+  cancelReason   Int? @map("cancel_reason")
+  fiscalData     Json? @map("fiscal_data") // Payme SetFiscalData
+  createdAt      DateTime         @default(now()) @db.Timestamptz(6) @map("created_at")
+
+  paymentOrder PaymentOrder @relation(fields: [paymentOrderId, orderKind], references: [id, kind], onDelete: Restrict)
+  payment      Payment?
+  refund       Refund?
+
+  @@unique([provider, externalId])
+  @@unique([paymentOrderId], map: "gateway_transactions_one_live_fixed_uq", where: raw("order_kind = 'FIXED' AND (state = 'PENDING' OR state = 'SUCCEEDED')"))
+  @@map("gateway_transactions")
+}
+
+/// Append-only, PARTITION BY RANGE (received_at), ≥ 5 yil saqlanadi.
+model GatewayEvent {
+  id         String          @default(uuid(7)) @db.Uuid
+  receivedAt DateTime        @default(now()) @db.Timestamptz(6) @map("received_at")
+  provider   GatewayProvider
+  method     String
+  externalId String? @map("external_id")
+  rawBody    String @map("raw_body") // aynan matn: imzolar xom qiymatlar bo'yicha hisoblanadi
+  request    Json?
+  response   Json?
+  httpStatus Int @map("http_status")
+  authOk     Boolean @map("auth_ok")
+  sourceIp   String?         @db.Inet @map("source_ip")
+  durationMs Int? @map("duration_ms")
+
+  @@id([id, receivedAt])
+  @@index([provider, externalId])
+  @@map("gateway_events")
+}
+
+model PaymentProviderConfig {
+  provider   GatewayProvider @id
+  enabled    Boolean         @default(false)
+  merchantId String @map("merchant_id")
+  secretEnc  Bytes @map("secret_enc")
+  keyVersion Int @map("key_version")
+  testMode   Boolean         @default(true) @map("test_mode")
+  allowedIps String[] @map("allowed_ips")
+  /// EMULATOR — ichki emulyator (kalitsiz lokal sinov); TEST — provayder sandbox'i; PROD — haqiqiy to'lovlar
+  mode       GatewayMode     @default(EMULATOR)
+  /// Maxfiy bo'lmagan sozlamalar (serviceId, merchantUserId, ...); maxfiylari — secretEnc (shifrlangan JSON)
+  settings   Json            @default("{}")
+  rowVersion Int             @default(1) @map("row_version")
+  updatedAt  DateTime        @updatedAt @db.Timestamptz(6) @map("updated_at")
+
+  @@map("payment_provider_configs")
+}
+
+// ── Finance ──
+
+model FxRate {
+  id            String   @id @default(uuid(7)) @db.Uuid
+  source        FxSource
+  base          Currency
+  quote         Currency
+  effectiveDate DateTime @db.Date @map("effective_date")
+  rate          Decimal  @db.Decimal(18, 6) // CBU Rate / Nominal
+  fetchedAt     DateTime @default(now()) @db.Timestamptz(6) @map("fetched_at")
+  rawPayload    Json? @map("raw_payload")
+  createdById   String?  @db.Uuid @map("created_by_id") // MANUAL bo'lsa majburiy (CHECK)
+
+  createdBy     User?          @relation("FxRateCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+  invoices      Invoice[]      @relation("InvoiceFxRate")
+  payments      Payment[]      @relation("PaymentFxRate")
+  allocations   Allocation[]   @relation("AllocationFxRate")
+  paymentOrders PaymentOrder[] @relation("PaymentOrderFxRate")
+
+  @@unique([source, base, quote, effectiveDate])
+  @@map("fx_rates")
+}
+
+/// 1000 Kassa · 1020 Bank · 1150/1151/1152 Clearing (Payme/Click/Uzum) · 1200 AR · 2100 Avanslar · 2200 QQS
+/// 4000 Daromad · 6100 Gateway komissiyasi · 7100/7200 FX foyda/zarar (realized) · 7150/7250 (unrealized, oy oxiri)
+model LedgerAccount {
+  code String            @id
+  name String
+  type LedgerAccountType
+
+  lines JournalLine[]
+
+  @@map("ledger_accounts")
+}
+
+model JournalEntry {
+  id             String   @id @default(uuid(7)) @db.Uuid
+  idempotencyKey String   @unique @map("idempotency_key") // "invoice:<id>:finalize"
+  effectiveDate  DateTime @db.Date @map("effective_date") // yopilgan davrga yozib bo'lmaydi (trigger)
+  sourceType     String @map("source_type")
+  sourceId       String   @db.Uuid @map("source_id")
+  description    String?
+  postedAt       DateTime @default(now()) @db.Timestamptz(6) @map("posted_at")
+
+  lines JournalLine[]
+
+  @@index([sourceType, sourceId])
+  @@index([effectiveDate])
+  @@map("journal_entries")
+}
+
+/// Ishorali summa: debit > 0, credit < 0. Har entry bo'yicha Σ amountUzsMinor = 0 (deferred trigger).
+model JournalLine {
+  id             BigInt   @id @default(autoincrement())
+  entryId        String   @db.Uuid @map("entry_id")
+  accountCode    String @map("account_code")
+  clientId       String?  @db.Uuid @map("client_id")
+  projectId      String?  @db.Uuid @map("project_id")
+  currency       Currency
+  amountMinor    BigInt @map("amount_minor")
+  amountUzsMinor BigInt @map("amount_uzs_minor")
+
+  entry   JournalEntry  @relation(fields: [entryId], references: [id], onDelete: Restrict)
+  account LedgerAccount @relation(fields: [accountCode], references: [code], onDelete: Restrict)
+  client  Client?       @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  project Project?      @relation(fields: [projectId], references: [id], onDelete: Restrict)
+
+  @@index([entryId])
+  @@index([accountCode, clientId, currency])
+  @@map("journal_lines")
+}
+
+model FinancialPeriod {
+  month        DateTime  @id @db.Date // oyning 1-sanasi
+  fxRevaluedAt DateTime? @db.Timestamptz(6) @map("fx_revalued_at") // oy oxiri USD AR qayta baholandi (yopishdan oldin majburiy)
+  closedAt     DateTime? @db.Timestamptz(6) @map("closed_at")
+  closedById String?   @db.Uuid @map("closed_by_id")
+
+  closedBy User? @relation("PeriodClosedBy", fields: [closedById], references: [id], onDelete: Restrict)
+
+  @@map("financial_periods")
+}
+
+/// Gapless raqamlash: UPDATE … SET next_value = next_value + 1 … RETURNING (tranzaksiya ichida).
+model DocumentSequence {
+  series    String // INV | CN | PAY | SUB | CL | DV | DEP
+  year      Int
+  nextValue Int    @default(1) @map("next_value")
+
+  @@id([series, year])
+  @@map("document_sequences")
+}
+
+model MrrSnapshot {
+  month          DateTime @db.Date
+  subscriptionId String   @db.Uuid @map("subscription_id")
+  clientId       String   @db.Uuid @map("client_id")
+  projectId      String   @db.Uuid @map("project_id")
+  currency       Currency
+  mrrMinor       BigInt @map("mrr_minor")
+  fxRate         Decimal  @db.Decimal(18, 6) @map("fx_rate")
+  mrrUzsMinor    BigInt @map("mrr_uzs_minor")
+
+  subscription Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Restrict)
+
+  @@id([month, subscriptionId])
+  @@index([month, projectId])
+  @@map("mrr_snapshots")
+}
+
+model ArAgingSnapshot {
+  asOf                DateTime @db.Date @map("as_of")
+  invoiceId           String   @db.Uuid @map("invoice_id")
+  clientId            String   @db.Uuid @map("client_id")
+  currency            Currency
+  outstandingMinor    BigInt @map("outstanding_minor")
+  outstandingUzsMinor BigInt @map("outstanding_uzs_minor")
+  daysPastDue         Int @map("days_past_due")
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+
+  @@id([asOf, invoiceId])
+  @@index([asOf, clientId])
+  @@map("ar_aging_snapshots")
+}
+
+model Expense {
+  id             String   @id @default(uuid(7)) @db.Uuid
+  category       String
+  projectId      String?  @db.Uuid @map("project_id")
+  currency       Currency
+  amountMinor    BigInt @map("amount_minor")
+  fxRate         Decimal  @default(1) @db.Decimal(18, 6) @map("fx_rate")
+  amountUzsMinor BigInt @map("amount_uzs_minor")
+  spentOn        DateTime @db.Date @map("spent_on")
+  description    String?
+  createdById    String   @db.Uuid @map("created_by_id")
+  createdAt      DateTime @default(now()) @db.Timestamptz(6) @map("created_at")
+
+  project   Project? @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  createdBy User     @relation("ExpenseCreatedBy", fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@index([spentOn])
+  @@map("expenses")
+}

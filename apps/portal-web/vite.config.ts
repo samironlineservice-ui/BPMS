@@ -1,0 +1,19 @@
+import path from 'node:path';
+import { tanstackRouter } from '@tanstack/router-plugin/vite';
+import react from '@vitejs/plugin-react';
+import { defineConfig } from 'vite';
+
+export default defineConfig({
+  plugins: [tanstackRouter({ target: 'react', autoCodeSplitting: true }), react()],
+  resolve: {
+    alias: {
+      '@': path.resolve(import.meta.dirname, 'src'),
+      '@ads/contracts': path.resolve(import.meta.dirname, '../../packages/contracts/src/index.ts'),
+    },
+  },
+  server: {
+    port: 5174,
+    strictPort: true,
+    proxy: { '/api': { target: 'http://127.0.0.1:3100', changeOrigin: false } },
+  },
+});

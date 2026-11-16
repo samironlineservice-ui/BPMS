@@ -1,0 +1,101 @@
+// ── Onlayn to'lovlar: checkout (o'zi obuna bo'lish), saqlangan kartalar, gateway rejimlari ──
+
+enum GatewayMode {
+  EMULATOR
+  TEST
+  PROD
+}
+
+enum PaymentOrderPurpose {
+  CHECKOUT
+  INVOICES
+  TOPUP
+  AUTOPAY
+}
+
+enum PaymentOrderStatus {
+  PENDING
+  PAID
+  FAILED
+  EXPIRED
+  CANCELLED
+}
+
+enum CheckoutStatus {
+  PENDING
+  PAID
+  FULFILLED
+  FAILED
+  EXPIRED
+  CANCELLED
+}
+
+enum CardStatus {
+  PENDING
+  ACTIVE
+  REMOVED
+}
+
+/// Mijoz kabinetdan xizmat tanlab, onlayn to'lagan buyurtma. Obuna FAQAT to'lov tushgach yaratiladi (to'lanmagan buyurtma qarz hosil qilmaydi).
+model CheckoutOrder {
+  id             String         @id @default(uuid(7)) @db.Uuid
+  code           String         @unique
+  clientId       String         @db.Uuid @map("client_id")
+  portalUserId   String?        @db.Uuid @map("portal_user_id")
+  projectId      String         @db.Uuid @map("project_id")
+  currency       Currency
+  /// [{ planPriceId, quantity }]
+  items          Json
+  intervalMonths Int            @map("interval_months")
+  startDate      DateTime       @db.Date @map("start_date")
+  /// Birinchi invoice summasi (billing bilan aynan bir xil formula)
+  amountMinor    BigInt         @map("amount_minor")
+  status         CheckoutStatus @default(PENDING)
+  paymentOrderId String?        @unique @db.Uuid @map("payment_order_id")
+  subscriptionId String?        @db.Uuid @map("subscription_id")
+  error          String?
+  createdAt      DateTime       @default(now()) @db.Timestamptz(6) @map("created_at")
+  paidAt         DateTime?      @db.Timestamptz(6) @map("paid_at")
+  fulfilledAt    DateTime?      @db.Timestamptz(6) @map("fulfilled_at")
+  expiresAt      DateTime       @db.Timestamptz(6) @map("expires_at")
+
+  client       Client        @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  portalUser   PortalUser?   @relation(fields: [portalUserId], references: [id], onDelete: Restrict)
+  project      Project       @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  paymentOrder PaymentOrder? @relation(fields: [paymentOrderId], references: [id], onDelete: Restrict)
+  subscription Subscription? @relation(fields: [subscriptionId], references: [id], onDelete: Restrict)
+
+  @@index([clientId, status])
+  @@index([status, expiresAt])
+  @@map("checkout_orders")
+}
+
+/// Saqlangan to'lov kartasi: faqat provayder tokeni (shifrlangan) va niqoblangan raqam. Karta raqami HECH QACHON saqlanmaydi.
+model PaymentCard {
+  id           String          @id @default(uuid(7)) @db.Uuid
+  clientId     String          @db.Uuid @map("client_id")
+  portalUserId String?         @db.Uuid @map("portal_user_id")
+  provider     GatewayProvider
+  tokenEnc     Bytes           @map("token_enc")
+  keyVersion   Int             @map("key_version")
+  maskedPan    String          @map("masked_pan")
+  expire       String
+  cardType     String?         @map("card_type")
+  phoneMask    String?         @map("phone_mask")
+  status       CardStatus      @default(PENDING)
+  isDefault    Boolean         @default(false) @map("is_default")
+  autopay      Boolean         @default(false)
+  createdAt    DateTime        @default(now()) @db.Timestamptz(6) @map("created_at")
+  verifiedAt   DateTime?       @db.Timestamptz(6) @map("verified_at")
+  removedAt    DateTime?       @db.Timestamptz(6) @map("removed_at")
+  lastUsedAt   DateTime?       @db.Timestamptz(6) @map("last_used_at")
+
+  client        Client         @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  portalUser    PortalUser?    @relation(fields: [portalUserId], references: [id], onDelete: Restrict)
+  paymentOrders PaymentOrder[]
+
+  @@index([clientId, status])
+  @@unique([clientId], map: "payment_cards_one_default_uq", where: raw("is_default AND status = 'ACTIVE'"))
+  @@unique([clientId], map: "payment_cards_one_autopay_uq", where: raw("autopay AND status = 'ACTIVE'"))
+  @@map("payment_cards")
+}
